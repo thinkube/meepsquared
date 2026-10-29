@@ -1,0 +1,53 @@
+12 runs; starting at 0
+12:32:19 [0] started 3090 llama trl #1 job aef333c7-9b2c-4cdd-af98-bd73b09a9ed3
+Terminated
+12 runs; starting at 1
+12:36:55 [1] started 3090 llama unsloth #1 job e9c06dc3-8d33-4d7d-9f43-c3dccfffb5e5
+12:40:56 [1] 3090 llama unsloth #1 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan
+    12:40:02 EXIT 0
+12:40:56 [2] started 3090 gemma trl #1 job cc3b2f06-af67-4c3f-8b95-8d22abf16a84
+12:44:58 [2] 3090 gemma trl #1 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-trl", "attn": null, "checkpointing": null, "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkub
+    12:44:44 EXIT 0
+12:44:59 [3] started 3090 gemma unsloth #1 job a9bab204-7ea6-4343-9282-a66cda7284af
+12:54:03 [3] 3090 gemma unsloth #1 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/t
+    12:52:53 EXIT 0
+12:54:04 [4] started 3090 llama trl #2 job a5f294b0-8a2c-4ba8-a6d7-7ece5ee39167
+12:59:06 [4] 3090 llama trl #2 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-trl", "attn": null, "checkpointing": null, "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/h
+    12:58:16 EXIT 0
+12:59:06 [5] started 3090 llama unsloth #2 job dbc31a55-cb54-43b5-a6dd-fcaea129afe7
+13:03:09 [5] 3090 llama unsloth #2 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan
+    13:02:11 EXIT 0
+13:03:09 [6] started 3090 gemma trl #2 job 61bce355-1db9-410e-828b-7e65c73496c7
+13:07:10 [6] 3090 gemma trl #2 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-trl", "attn": null, "checkpointing": null, "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkub
+    13:06:53 EXIT 0
+13:07:11 [7] started 3090 gemma unsloth #2 job c0db064d-219e-4d3d-9b32-b8c053532253
+13:13:14 [7] 3090 gemma unsloth #2 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/t
+    13:12:38 EXIT 0
+13:13:14 [8] started 3090 llama trl #3 job f3c90af7-89f8-423c-9b11-ff42b8bc4d6a
+13:18:17 [8] 3090 llama trl #3 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-trl", "attn": null, "checkpointing": null, "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/h
+    13:17:30 EXIT 0
+13:18:17 [9] started 3090 llama unsloth #3 job 9ce567fb-f036-4a66-b16d-4195472fc4fa
+13:23:19 [9] 3090 llama unsloth #3 error the server 'job-98073427' did not become ready in 240 seconds
+13:23:19 [10] started 3090 gemma trl #3 job 8996655c-6a11-49a8-97d9-e3aa85c50dc5
+13:27:21 [10] 3090 gemma trl #3 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-trl", "attn": null, "checkpointing": null, "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkub
+    13:27:00 EXIT 0
+13:27:21 [11] started 3090 gemma unsloth #3 job ff00276c-a6cb-4260-a475-181b5bc2411b
+13:33:25 [11] 3090 gemma unsloth #3 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/t
+    13:32:51 EXIT 0
+round done; failed: ['[9] 3090 llama unsloth #3']
+1 runs; starting at 0
+13:47:37 [0] started 3090 llama unsloth #3 job bcbc100b-a7bc-475f-b08f-a4c7809bc532
+13:51:38 [0] 3090 llama unsloth #3 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan
+    13:50:42 EXIT 0
+round done; failed: none

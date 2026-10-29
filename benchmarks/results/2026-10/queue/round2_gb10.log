@@ -1,0 +1,123 @@
+11:29:44 started plan gemma job f995f718-6354-49a5-a01e-46dee28a0335 kernel llebre
+11:32:45 plan gemma completed 
+    RESULT plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-lora.json
+    11:31:48 EXIT 0
+11:32:45 started plan qwen job 876fbff6-48a8-49a3-943f-1fb20ee844db kernel llebre
+11:35:45 plan qwen completed 
+    RESULT plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-lora.json
+    11:35:28 EXIT 0
+11:35:45 started llama hand-all #1 job b6b7afc0-8dca-4746-b571-c178ce7d819f kernel llebre
+11:39:46 llama hand-all #1 completed 
+      0%|          | 0/30 [00:00<?, ?it/s]Backend impl 'liger_kernel.ops.backends._ascend.rope' for op 'rope' could not be imported: ImportError: cannot import name 'tanh' from 'triton.language.math' (/usr/local/lib/python3.12/dist-packages/triton/language/math.py)
+    RESULT {"benchmark": "sft", "arm": "llama-hand-all", "attn": "flash_attention_2", "checkpointing": "true", "checkpointed_layers": {"whole": 32, "selective": 0, "none": 0}, "fused": true, "compiled": false, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimiz
+    11:38:44 EXIT 0
+11:39:46 started llama hand-none #1 job 95b8321d-735f-4b2e-9a0b-df17483bd50b kernel llebre
+11:42:46 llama hand-none #1 completed 
+      0%|          | 0/30 [00:00<?, ?it/s]Backend impl 'liger_kernel.ops.backends._ascend.rope' for op 'rope' could not be imported: ImportError: cannot import name 'tanh' from 'triton.language.math' (/usr/local/lib/python3.12/dist-packages/triton/language/math.py)
+    RESULT {"benchmark": "sft", "arm": "llama-hand-none", "attn": "flash_attention_2", "checkpointing": "false", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optim
+    11:42:29 EXIT 0
+11:42:46 started llama auto #1 job 7b75b79c-f796-488f-9d16-9db3203dc784 kernel llebre
+11:45:47 llama auto #1 completed 
+      0%|          | 0/30 [00:00<?, ?it/s]Backend impl 'liger_kernel.ops.backends._ascend.rope' for op 'rope' could not be imported: ImportError: cannot import name 'tanh' from 'triton.language.math' (/usr/local/lib/python3.12/dist-packages/triton/language/math.py)
+    RESULT {"benchmark": "sft", "arm": "llama-auto", "attn": "flash_attention_2", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer":
+    11:45:28 EXIT 0
+11:45:47 started gemma today-sdpa #1 job 730971b0-ba9a-4e2f-8355-f0d009e257bb kernel llebre
+11:52:47 gemma today-sdpa #1 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-today-sdpa", "attn": "sdpa", "checkpointing": "false", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 42}, "fused": true, "compiled": true, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "le
+    11:51:51 EXIT 0
+11:52:47 started gemma hand-all #1 job ab698713-e8d3-4294-93ab-b3e83fdd287c kernel llebre
+11:56:48 gemma hand-all #1 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-hand-all", "attn": "llebre_varlen", "checkpointing": "true", "checkpointed_layers": {"whole": 42, "selective": 0, "none": 0}, "fused": true, "compiled": true, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit
+    11:56:17 EXIT 0
+11:56:48 started gemma auto #1 job f550f357-ef7e-44d6-b854-8770e3ff2558 kernel llebre
+12:00:48 gemma auto #1 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-auto", "attn": "llebre_varlen", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 42}, "fused": true, "compiled": true, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "
+    12:00:00 EXIT 0
+12:00:48 started qwen hand-all #1 job 82683e3c-88f5-44c4-86d6-c362dab05a3b kernel llebre
+12:05:48 qwen hand-all #1 completed 
+    RESULT {"benchmark": "sft", "arm": "qwen-hand-all", "attn": "flash_attention_2", "checkpointing": "true", "checkpointed_layers": {"whole": 32, "selective": 0, "none": 0}, "fused": true, "compiled": false, "model": "Qwen/Qwen3.5-9B", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", 
+    12:05:08 EXIT 0
+12:05:49 started qwen hand-none #1 job cc41f110-952f-46fb-abc6-02ae691e13fa kernel llebre
+12:10:49 qwen hand-none #1 completed 
+    RESULT {"benchmark": "sft", "arm": "qwen-hand-none", "attn": "flash_attention_2", "checkpointing": "false", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "Qwen/Qwen3.5-9B", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit"
+    12:09:44 EXIT 0
+12:10:49 started qwen auto #1 job 94784f83-a6d5-4f8e-940c-51a7340ec61d kernel llebre
+12:15:50 qwen auto #1 completed 
+    RESULT {"benchmark": "sft", "arm": "qwen-auto", "attn": "flash_attention_2", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "Qwen/Qwen3.5-9B", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "lea
+    12:14:44 EXIT 0
+12:15:50 started llama hand-all #2 job ed4feff9-ad02-42b9-9024-994662a96a1b kernel llebre
+12:19:50 llama hand-all #2 completed 
+      0%|          | 0/30 [00:00<?, ?it/s]Backend impl 'liger_kernel.ops.backends._ascend.rope' for op 'rope' could not be imported: ImportError: cannot import name 'tanh' from 'triton.language.math' (/usr/local/lib/python3.12/dist-packages/triton/language/math.py)
+    RESULT {"benchmark": "sft", "arm": "llama-hand-all", "attn": "flash_attention_2", "checkpointing": "true", "checkpointed_layers": {"whole": 32, "selective": 0, "none": 0}, "fused": true, "compiled": false, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimiz
+    12:18:47 EXIT 0
+12:19:50 started llama hand-none #2 job cbb557af-cc35-4fba-bb94-abcbfd20bbf2 kernel llebre
+12:22:50 llama hand-none #2 completed 
+      0%|          | 0/30 [00:00<?, ?it/s]Backend impl 'liger_kernel.ops.backends._ascend.rope' for op 'rope' could not be imported: ImportError: cannot import name 'tanh' from 'triton.language.math' (/usr/local/lib/python3.12/dist-packages/triton/language/math.py)
+    RESULT {"benchmark": "sft", "arm": "llama-hand-none", "attn": "flash_attention_2", "checkpointing": "false", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optim
+    12:22:33 EXIT 0
+12:22:50 started llama auto #2 job d05b7d83-2fcd-4451-af26-fa3fa925e229 kernel llebre
+12:25:51 llama auto #2 completed 
+      0%|          | 0/30 [00:00<?, ?it/s]Backend impl 'liger_kernel.ops.backends._ascend.rope' for op 'rope' could not be imported: ImportError: cannot import name 'tanh' from 'triton.language.math' (/usr/local/lib/python3.12/dist-packages/triton/language/math.py)
+    RESULT {"benchmark": "sft", "arm": "llama-auto", "attn": "flash_attention_2", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer":
+    12:25:32 EXIT 0
+12:25:51 started gemma today-sdpa #2 job 3abd0efd-d693-489b-8113-d3d6c8bd912d kernel llebre
+12:31:51 gemma today-sdpa #2 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-today-sdpa", "attn": "sdpa", "checkpointing": "false", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 42}, "fused": true, "compiled": true, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "le
+    12:31:40 EXIT 0
+12:31:51 started gemma hand-all #2 job 2758f042-29fa-4458-8609-55db44f0ee91 kernel llebre
+12:35:34 started gemma auto #2 job 80bfd513-1384-4c2c-813d-541a3ebd0121 kernel llebre
+12:39:37 gemma auto #2 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-auto", "attn": "llebre_varlen", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 42}, "fused": true, "compiled": true, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "
+    12:38:47 EXIT 0
+12:39:38 started qwen hand-all #2 job ffe5ff62-322a-4610-b8ed-52a0f10f752a kernel llebre
+12:44:38 qwen hand-all #2 completed 
+    RESULT {"benchmark": "sft", "arm": "qwen-hand-all", "attn": "flash_attention_2", "checkpointing": "true", "checkpointed_layers": {"whole": 32, "selective": 0, "none": 0}, "fused": true, "compiled": false, "model": "Qwen/Qwen3.5-9B", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", 
+    12:43:57 EXIT 0
+12:44:38 started qwen hand-none #2 job d429b421-abd5-4bc8-bf86-de93f0ca6153 kernel llebre
+12:51:40 qwen hand-none #2 completed 
+    RESULT {"benchmark": "sft", "arm": "qwen-hand-none", "attn": "flash_attention_2", "checkpointing": "false", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "Qwen/Qwen3.5-9B", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit"
+    12:51:07 EXIT 0
+12:51:40 started qwen auto #2 job 971f7832-01ae-4943-86a1-6771ffd6b9f3 kernel llebre
+12:56:42 qwen auto #2 completed 
+    RESULT {"benchmark": "sft", "arm": "qwen-auto", "attn": "flash_attention_2", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "Qwen/Qwen3.5-9B", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "lea
+    12:55:38 EXIT 0
+12:56:43 started llama hand-all #3 job a1748360-8812-45c7-a33d-0eeadbbe7ca2 kernel llebre
+13:00:45 llama hand-all #3 completed 
+      0%|          | 0/30 [00:00<?, ?it/s]Backend impl 'liger_kernel.ops.backends._ascend.rope' for op 'rope' could not be imported: ImportError: cannot import name 'tanh' from 'triton.language.math' (/usr/local/lib/python3.12/dist-packages/triton/language/math.py)
+    RESULT {"benchmark": "sft", "arm": "llama-hand-all", "attn": "flash_attention_2", "checkpointing": "true", "checkpointed_layers": {"whole": 32, "selective": 0, "none": 0}, "fused": true, "compiled": false, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimiz
+    12:59:40 EXIT 0
+13:00:45 started llama hand-none #3 job 68114fae-76d1-42ab-80dc-8a214dcdd201 kernel llebre
+13:03:48 llama hand-none #3 completed 
+      0%|          | 0/30 [00:00<?, ?it/s]Backend impl 'liger_kernel.ops.backends._ascend.rope' for op 'rope' could not be imported: ImportError: cannot import name 'tanh' from 'triton.language.math' (/usr/local/lib/python3.12/dist-packages/triton/language/math.py)
+    RESULT {"benchmark": "sft", "arm": "llama-hand-none", "attn": "flash_attention_2", "checkpointing": "false", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optim
+    13:03:30 EXIT 0
+13:03:48 started llama auto #3 job 0f2658a2-77ad-4795-b24a-ade45d8676e1 kernel llebre
+13:06:48 llama auto #3 completed 
+      0%|          | 0/30 [00:00<?, ?it/s]Backend impl 'liger_kernel.ops.backends._ascend.rope' for op 'rope' could not be imported: ImportError: cannot import name 'tanh' from 'triton.language.math' (/usr/local/lib/python3.12/dist-packages/triton/language/math.py)
+    RESULT {"benchmark": "sft", "arm": "llama-auto", "attn": "flash_attention_2", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer":
+    13:06:31 EXIT 0
+13:06:48 started gemma today-sdpa #3 job d020918f-7aa6-4a94-920a-4f91bf869b00 kernel llebre
+13:12:54 gemma today-sdpa #3 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-today-sdpa", "attn": "sdpa", "checkpointing": "false", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 42}, "fused": true, "compiled": true, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "le
+    13:12:00 EXIT 0
+13:12:54 started gemma hand-all #3 job 683d22d2-e087-4e09-805f-d191e285a7f1 kernel llebre
+13:16:54 gemma hand-all #3 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-hand-all", "attn": "llebre_varlen", "checkpointing": "true", "checkpointed_layers": {"whole": 42, "selective": 0, "none": 0}, "fused": true, "compiled": true, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit
+    13:16:23 EXIT 0
+13:16:55 started gemma auto #3 job 40817a1d-f512-41f9-bd67-e1ed3dfc049b kernel llebre
+13:22:59 gemma auto #3 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-auto", "attn": "llebre_varlen", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 42}, "fused": true, "compiled": true, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "
+    13:22:37 EXIT 0
+13:23:00 started qwen hand-all #3 job 01bd11fa-b512-448e-a9e4-4c5fc404dd85 kernel llebre
+13:28:02 qwen hand-all #3 completed 
+    RESULT {"benchmark": "sft", "arm": "qwen-hand-all", "attn": "flash_attention_2", "checkpointing": "true", "checkpointed_layers": {"whole": 32, "selective": 0, "none": 0}, "fused": true, "compiled": false, "model": "Qwen/Qwen3.5-9B", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", 
+    13:27:19 EXIT 0
+13:28:02 started qwen hand-none #3 job 424c0fc7-4d43-42bc-9fe2-bdc090a6b622 kernel llebre
+13:33:05 qwen hand-none #3 completed 
+    RESULT {"benchmark": "sft", "arm": "qwen-hand-none", "attn": "flash_attention_2", "checkpointing": "false", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "Qwen/Qwen3.5-9B", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit"
+    13:31:59 EXIT 0
+13:33:05 started qwen auto #3 job 674e8b65-d616-4b28-81ef-da846f12858e kernel llebre
+13:38:08 qwen auto #3 completed 
+    RESULT {"benchmark": "sft", "arm": "qwen-auto", "attn": "flash_attention_2", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "Qwen/Qwen3.5-9B", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-lora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "lea
+    13:37:07 EXIT 0
+chain done; failed: none

@@ -1,0 +1,103 @@
+= Coming from Unsloth
+:page-type: reference
+
+_How code written for Unsloth runs on Meep², and the training job that does the same._
+
+.TL;DR
+Change the import lines; the rest of a typical SFT script runs as it is, on Meep²'s `MeepLanguageModel`, `get_peft_model` and `train_on_responses_only`. For new code, a training job (`m2.TrainingJob`) does the same in fewer lines, and Meep² chooses the settings the script sets by hand.
+
+[source,python]
+----
+from meepsquared import MeepLanguageModel as FastLanguageModel   # was: from unsloth import FastLanguageModel
+from meepsquared import MeepModel as FastModel                    # was: from unsloth import FastModel
+from meepsquared.chat_templates import train_on_responses_only     # was: from unsloth.chat_templates import ...
+----
+
+== The calls code from Unsloth uses
+
+These calls have Unsloth's shape. They are Meep²'s lower-level calls: a training job is built on them, and they stay for code coming from Unsloth.
+
+* `MeepLanguageModel` and `MeepModel`, in place of `FastLanguageModel` and `FastModel`, with `from_pretrained(model_name, max_seq_length, dtype, load_in_4bit, ...)` and `get_peft_model(model, r, lora_alpha, lora_dropout, target_modules, use_gradient_checkpointing, random_state, ...)`.
+* `for_inference(model)` and `for_training(model)`.
+* `model.save_pretrained_merged(directory, tokenizer, save_method)` and `model.push_to_hub_merged(repo_id, tokenizer, save_method, token)`.
+* `train_on_responses_only(trainer, instruction_part, response_part)`.
+* TRL's `SFTTrainer` and `GRPOTrainer` take their settings from the model, as with Unsloth: padding-free batches, gradient checkpointing.
+
+xref:api.adoc[API] lists their arguments.
+
+== A typical Unsloth script, as a training job
+
+An Unsloth script loads the model, adds LoRA, sets up TRL's trainer, puts the loss on the answers, trains and saves. On Meep²'s Unsloth-shaped calls, after the import change:
+
+[source,python]
+----
+from meepsquared import MeepLanguageModel as FastLanguageModel
+from meepsquared.chat_templates import train_on_responses_only
+from datasets import load_dataset
+from trl import SFTConfig, SFTTrainer
+
+model, tokenizer = FastLanguageModel.from_pretrained("Qwen/Qwen3-8B", max_seq_length=1024, load_in_4bit=True)
+model = FastLanguageModel.get_peft_model(model, r=16, lora_alpha=16, lora_dropout=0,
+                                         use_gradient_checkpointing="unsloth", random_state=3407)
+dataset = load_dataset("HuggingFaceH4/no_robots", split="train").select_columns(["messages"])
+
+trainer = SFTTrainer(model=model, processing_class=tokenizer, train_dataset=dataset,
+                     args=SFTConfig(output_dir="out", per_device_train_batch_size=2, gradient_accumulation_steps=4,
+                                    learning_rate=2e-4, warmup_steps=5, max_steps=60, optim="adamw_8bit",
+                                    lr_scheduler_type="linear", logging_steps=1))
+trainer = train_on_responses_only(trainer, instruction_part="<|im_start|>user\n",
+                                  response_part="<|im_start|>assistant\n")
+trainer.train()
+model.save_pretrained_merged("out/adapter", tokenizer, save_method="lora")
+----
+
+The same training as a job:
+
+[source,python]
+----
+import meepsquared as m2
+from meepsquared.chat_templates import train_on_responses_only
+
+job = m2.TrainingJob(model="Qwen/Qwen3-8B", data="HuggingFaceH4/no_robots", method="qlora", steps=60)
+train_on_responses_only(job.trainer(), instruction_part="<|im_start|>user\n",
+                        response_part="<|im_start|>assistant\n")
+result = job.train()
+result.save("out/adapter")
+----
+
+What changes:
+
+* The job keeps only the `messages` column of the data itself.
+* The batch, the learning rate, the warm-up, the schedule and the checkpointed layers are chosen by auto mode, and the plan says why. The script's values are one person's choices for one GPU; to keep them, give them in the job: `recipe=m2.Recipe(effective_batch=8, learning_rate=2e-4, warmup_steps=5)` and `overrides=m2.Overrides(micro_batch=2)`. A linear decay is not offered; the schedules are constant after a warm-up, and cosine.
+* `job.trainer()` is the `SFTTrainer` that `job.train()` runs, so `train_on_responses_only` applies to it as before.
+
+== Different
+
+[cols="1,2",options="header"]
+|===
+| In Unsloth | In Meep²
+
+| `use_gradient_checkpointing="unsloth"`
+| Taken as `"auto"`: only as many layers as the free memory requires are checkpointed, measured for the trainer's batch.
+
+| `fast_inference=True`, vLLM in the training process
+| Refused. GRPO generates through vLLM with TRL's own `GRPOConfig(use_vllm=True, vllm_mode="colocate")`; see xref:grpo.adoc[GRPO]. With `fast_inference=False`, `gpu_memory_utilization` and `max_lora_rank` have nothing to set and are not used.
+
+| `GRPOConfig(per_device_train_batch_size=1)` with several generations, which Unsloth raises to `num_generations`
+| TRL's own rule applies: the batch holds whole groups. Give `per_device_train_batch_size=num_generations`, or a multiple of it.
+
+| `save_method="merged_4bit"`
+| Refused: `save_method` is `"lora"` or `"merged_16bit"`; see xref:saving.adoc[Saving].
+
+| `save_pretrained_gguf`
+| Not offered; convert a 16-bit save with llama.cpp's converter.
+
+| `FastVisionModel`, `finetune_vision_layers=True`
+| Vision layers are not trained; `finetune_vision_layers=True` is refused.
+
+| LoRA on MoE experts by the target modules alone
+| Name the expert stacks with `target_parameters`; see xref:mixture-of-experts.adoc[Mixture of experts].
+
+| Apache-2.0 declared for `unsloth`; LGPL-3.0 for `unsloth_zoo`, which it requires; AGPL-3.0 for the Studio UI, which the wheel bundles
+| Apache-2.0 for Meep², permissive licenses for what it installs; see xref:licensing.adoc[Licensing].
+|===

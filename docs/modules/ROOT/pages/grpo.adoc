@@ -1,0 +1,135 @@
+= GRPO
+:page-type: concept
+
+_Reinforcement learning with TRL's GRPOTrainer on a Meep² model, generating with the model itself or with vLLM._
+
+.TL;DR
+`m2.TrainingJob(model=..., data=prompts, task="grpo", rewards=[...])` trains GRPO with TRL's `GRPOTrainer`. The recipe sets the generation: `generations`, `max_completion_length`, `temperature`, `top_p`, `top_k` and `chat_template_kwargs`. `Overrides(vllm=True)` generates with vLLM inside the trainer (TRL's colocate mode). Meep² makes the trained weights reach vLLM under the names vLLM knows.
+
+== Overview
+
+GRPO (Group Relative Policy Optimization) generates several answers to each prompt, scores them with your reward functions, and moves the model towards the answers that scored better than the others of their group. Most of a step is generation.
+
+Without vLLM, the trainer generates with the training model through Transformers. With vLLM in colocate mode, vLLM runs in the training process, on the same GPU, and after each step TRL sends it the trained weights.
+
+== A training job
+
+[source,python]
+----
+import meepsquared as m2
+
+def short(completions, **kwargs):
+    return [-len(c) / 100 for c in completions]
+
+job = m2.TrainingJob(model="Qwen/Qwen3-4B", data="trl-lib/tldr", task="grpo", rewards=[short], steps=200,
+                     recipe=m2.Recipe(generations=8, max_length=1024, max_completion_length=256,
+                                      temperature=1.0, top_k=40, chat_template_kwargs={"enable_thinking": False}),
+                     overrides=m2.Overrides(vllm=True))
+print(job.plan())
+job.train().save("grpo-adapter")
+----
+
+The https://github.com/thinkube/meepsquared/tree/main/notebooks[tutorial notebook] `04-grpo-zebra.ipynb` trains this way, with vLLM as a setting.
+
+The data needs a `prompt` column. Its other columns stay, and TRL passes them to the reward functions by name. In YAML, write each reward function as `module:function` or `file.py:function`.
+
+== How many completions each prompt gets
+
+For each prompt, GRPO generates a group of completions, scores each one with your reward functions, and learns from how each completion scored against the rest of its group. The size of that group is `generations`.
+
+* *Default:* 8 completions per prompt, TRL's default (`GRPOConfig.num_generations`). Meep²'s auto mode does not change it.
+* *To change it:* `Recipe(generations=16)` in Python, or `generations: 16` under `recipe:` in a YAML job. It must be at least 2, since a group of one has nothing to be compared with.
+* *The plan shows it,* with where it came from: `generations  8 (TRL's default)`; a value you set is shown beside that default.
+* *What it costs:* a step generates `generations` completions for every prompt it trains on, and generating is most of a GRPO step. Doubling `generations` roughly doubles the time of a step.
+* *What it gives:* a larger group compares more answers to each prompt, which makes the score of each completion against its group less noisy.
+* *How it sets the batch:* the effective batch counts completions, not prompts. With 8 generations, an effective batch of 8 is one prompt per update; `Recipe(effective_batch=32)` makes it four prompts of 8 completions.
+
+The completions of a group must differ, or there is nothing to compare: the sampling settings below (`temperature`, `top_p`, `top_k`) keep them apart.
+
+== Generation settings
+
+
+Each is TRL's default unless you set it in the recipe:
+
+* `generations`: the completions for each prompt (see above).
+* `max_completion_length`: the most tokens of one completion. `max_length` holds the prompt and the completion, so it must be longer.
+* `temperature`, `top_p`, `top_k`: the sampling. The completions of a group must differ, or there is nothing to compare.
+* `chat_template_kwargs`: arguments for the chat template, such as `{"enable_thinking": False}` for a direct answer from a thinking model.
+
+With `Overrides(vllm=True)`, vLLM generates in the training process, on the same GPU (TRL's colocate mode), and after each step TRL sends it the trained weights. vLLM takes 0.3 of the GPU's memory (TRL's default), and Meep² measures the batch with that share kept free. It needs TRL 1.16 or later and vLLM installed (see <<_installing_vllm>>); it is refused with `method="fp8"`. TRL sets the variables of a one-process launch itself, so the job runs from `python`, a notebook or `torchrun`.
+
+The job keeps TRL's default for the penalty for drifting from the base model (`beta`, 0: no reference model in memory). For that, or another `GRPOConfig` setting a job does not have, use the lower-level calls below.
+
+== With your own GRPOConfig
+
+[source,python]
+----
+import meepsquared as m2
+from trl import GRPOConfig, GRPOTrainer
+
+model, tokenizer = m2.MeepLanguageModel.from_pretrained("Qwen/Qwen3.5-4B", max_seq_length=3072)
+model = m2.MeepLanguageModel.get_peft_model(model, r=16, lora_alpha=16)
+
+args = GRPOConfig(output_dir="out", num_generations=8, per_device_train_batch_size=8,
+                  max_completion_length=800, learning_rate=1e-5, optim="paged_adamw_8bit", bf16=True,
+                  use_vllm=True, vllm_mode="colocate", vllm_gpu_memory_utilization=0.3,
+                  vllm_max_model_length=3072)
+trainer = GRPOTrainer(model=model, processing_class=tokenizer, reward_funcs=[my_reward],
+                      args=args, train_dataset=prompts)
+trainer.train()
+----
+
+[source,bash]
+----
+torchrun --nproc_per_node 1 train_grpo.py
+----
+
+vLLM in colocate mode runs in a process group. TRL 1.16 sets the variables of a one-process launch itself (`RANK`, `WORLD_SIZE` and the master address) when they are not set, so `python train_grpo.py` and a notebook work as well as `torchrun`.
+
+Here you choose the batch, the learning rate and the optimizer in `GRPOConfig`; the lower-level calls do not choose them for you. The trainer takes gradient checkpointing and Liger from the model, as below.
+
+== What Meep² sets up
+
+* *Gradient checkpointing and Liger* from the model, as for SFT. With TRL 0.29, the GRPO loss is computed by Liger's chunked loss; with TRL 1.x, Liger's model kernels apply without a fused loss.
+* *Weight names for vLLM.* Transformers loads the text model out of a multimodal checkpoint, such as Qwen3.5's, by renaming its weights; vLLM holds the checkpoint's architecture and knows only the checkpoint's names. Meep² renames each weight TRL sends back to its checkpoint name, with the renamings recorded when the model was loaded.
+
+== Installing vLLM
+
+vLLM and PyTorch must be the same pair: a vLLM wheel is compiled against one PyTorch build, and `pip install vllm` brings its own PyTorch, which replaces the one built for your GPU. TRL 1.16 needs vLLM 0.22 or later.
+
+[cols="1,2",options="header"]
+|===
+| Your PyTorch | The vLLM to install
+
+| PyTorch from PyPI or PyTorch's CUDA index (an x86-64 machine, or a DGX Spark with `torch==2.11.0` from the CUDA 13 index)
+| `pip install vllm` on x86-64. On the Spark, the wheel of https://github.com/thinkube/tk-vllm-wheels/releases/tag/v0.23.0[tk-vllm-wheels v0.23.0], built on that PyTorch for the GB10: `pip install <the wheel's URL>`.
+
+| NVIDIA's PyTorch container (`nvcr.io/nvidia/pytorch:26.03-py3`, the environment of Meep²'s `Containerfile` and of Thinkube)
+| The wheel of https://github.com/thinkube/tk-vllm-wheels/releases/tag/v0.22.1-nv26.03[tk-vllm-wheels v0.22.1-nv26.03], built on the container's own PyTorch, one wheel per architecture (arm64 for the GB10, x86-64 for Turing to Blackwell). The commands are below. A vLLM from PyPI or from the v0.23.0 release fails to import there (`register_opaque_type() got an unexpected keyword argument 'hoist'`).
+|===
+
+On NVIDIA's container, install the wheel and then raise Transformers back:
+
+[source,bash]
+----
+pip install --break-system-packages \
+  https://github.com/thinkube/tk-vllm-wheels/releases/download/v0.22.1-nv26.03/vllm-0.22.2.dev0+g0decac0d9.d20261026.cu132-cp312-cp312-linux_aarch64.whl
+pip install --break-system-packages "transformers>=5.17"
+----
+
+On an x86-64 machine the file name ends in `linux_x86_64.whl`. The first command installs vLLM's dependencies from PyPI; one of them, xgrammar 0.2.5, pins Transformers below 5 and makes pip lower it to 4.57. The second raises it back to the Transformers Meep² needs; pip reports xgrammar's pin as a conflict and keeps going. vLLM itself accepts Transformers 5.6 or later.
+
+vLLM 0.22.1 is the newest vLLM that builds on this PyTorch: vLLM 0.23 uses a part of PyTorch's stable C++ API (`csrc/libtorch_stable/cuda_view.cu`) that NVIDIA's 26.03 build does not have. TRL 1.16 accepts vLLM 0.22. `tk-vllm-wheels` builds its wheels from upstream vLLM with one script, `build.sh`, which anyone with the container can run: `build.sh v0.22.1 --existing-torch` inside it, with one patch (`register_opaque_type` called without `hoist`) kept beside the wheels.
+
+vLLM's dependency tilelang ships a stub CUDA runtime that FlashInfer, another dependency, picks over the real one (`libcudart_stub.so: undefined symbol: cudaDeviceReset` when vLLM starts). Meep² hides stub libraries from that lookup as FlashInfer loads, so that it finds the real runtime; nothing is needed from you, as long as Meep² is imported before FlashInfer.
+
+== Settings TRL requires
+
+* `per_device_train_batch_size` holds whole groups: give `num_generations` or a multiple of it. TRL refuses a batch of 1 with several generations.
+* vLLM generation through Meep² needs TRL 1.16 or later.
+
+== Limits
+
+* `from_pretrained(fast_inference=True)` is refused: vLLM is started by TRL's `GRPOConfig`, not by the model.
+* A training job with `method="fp8"` does not generate through vLLM: Meep² does not send weights held as FP8 to vLLM.
+* A weight that Transformers built by merging or splitting checkpoint tensors cannot be renamed alone; sending it to vLLM is refused.

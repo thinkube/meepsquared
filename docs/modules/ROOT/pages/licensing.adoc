@@ -1,0 +1,46 @@
+= Licensing
+:page-type: reference
+
+_What license Meep² carries, what licenses the packages it installs carry, and what the other training engines' files say._
+
+.TL;DR
+Meep² is Apache-2.0, and the packages it installs are permissively licensed: Apache-2.0, MIT or BSD, and MPL-2.0 for certifi and tqdm, a license that applies file by file and lets a product ship them unchanged. PyTorch and the CUDA libraries come from your environment under their own licenses. For a person running their own scripts, the license of an engine changes nothing; for a company shipping one inside a product, it does.
+
+== Meep² and what it installs
+
+Every license was read in the repository's license file at the version named in Meep²'s `pyproject.toml`.
+
+[cols="2,1,3",options="header"]
+|===
+| Package | License | Where
+
+| Meep² | Apache-2.0 | `LICENSE`; the vendored Axolotl kernels are credited in `NOTICE`
+| Transformers | Apache-2.0 | https://github.com/huggingface/transformers/blob/main/LICENSE
+| PEFT | Apache-2.0 | https://github.com/huggingface/peft/blob/main/LICENSE
+| TRL | Apache-2.0 | https://github.com/huggingface/trl/blob/main/LICENSE
+| datasets | Apache-2.0 | https://github.com/huggingface/datasets/blob/main/LICENSE
+| Axolotl's LoRA kernels (vendored) | Apache-2.0 | https://github.com/axolotl-ai-cloud/axolotl/blob/main/LICENSE
+| Liger Kernel | BSD-2-Clause | https://github.com/linkedin/Liger-Kernel/blob/main/LICENSE
+| bitsandbytes | MIT | https://github.com/bitsandbytes-foundation/bitsandbytes/blob/main/LICENSE
+| FlashAttention | BSD-3-Clause | https://github.com/Dao-AILab/flash-attention/blob/main/LICENSE
+| flash-linear-attention | MIT | https://github.com/fla-org/flash-linear-attention/blob/main/LICENSE
+| Triton | MIT | https://github.com/triton-lang/triton/blob/main/LICENSE
+| certifi (installed by requests) | MPL-2.0 | https://github.com/certifi/python-certifi/blob/master/LICENSE
+| tqdm (installed by Transformers and datasets) | MPL-2.0 and MIT | https://github.com/tqdm/tqdm/blob/master/LICENCE
+| PyTorch | BSD-style | https://github.com/pytorch/pytorch/blob/main/LICENSE
+| NVIDIA CUDA libraries (from NVIDIA's container, or the wheels pip installs with PyTorch) | NVIDIA's license | https://docs.nvidia.com/cuda/eula/
+| vLLM (optional, for GRPO) | Apache-2.0 | https://github.com/vllm-project/vllm/blob/main/LICENSE
+|===
+
+== Other training engines
+
+As their license files read on 25 October 2026; a license can change, so read the files before relying on this page.
+
+*Unsloth.* The package `unsloth` is Apache-2.0, and its README says so: "the core Unsloth package remains licensed under Apache 2.0, while certain optional components, such as the Unsloth Studio UI, are licensed under AGPL-3.0". A training with Unsloth also runs on `unsloth_zoo`, which `unsloth` requires and imports on import: its license file is the **GNU Lesser General Public License v3.0** (https://github.com/unslothai/unsloth-zoo/blob/main/LICENSE). The LGPL is a copyleft license: whoever distributes a product that includes `unsloth_zoo` must offer its source with any modification and let the user replace that part. The wheel on PyPI also bundles the Studio UI: `unsloth` 2026.10.7 holds 1,972 files under `studio/`, with `studio/LICENSE.AGPL-3.0`, and 29 under `unsloth_cli/`, which the repository's license file marks AGPL-3.0 as well, while the wheel's metadata declares `Apache-2.0` alone. GitHub issue https://github.com/unslothai/unsloth/issues/8901[unslothai/unsloth#8901] reported this on 2026-08-15 and was closed on 2026-10-11 without a comment; the wheel checked here is from after that date. `unsloth_zoo` declares no license in its PyPI metadata. So `pip` shows none of this.
+
+What it means in practice:
+
+* Running Unsloth yourself, on your own machine or in a notebook: nothing to do. The LGPL and the AGPL bind the one who distributes, not the one who uses.
+* Shipping a product with Unsloth inside: the LGPL's conditions apply to the `unsloth_zoo` part, and the AGPL's to the Studio UI and `unsloth_cli`, which the wheel includes.
+
+Meep² exists because Thinkube needed an engine with no such part; see xref:index.adoc[Overview].

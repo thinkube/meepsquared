@@ -1,0 +1,6 @@
+{"arm": "gemma-trl-untrained", "model": "google/gemma-4-E4B-it", "eval_loss": 3.905062}
+{"arm": "gemma-unsloth-untrained", "model": "google/gemma-4-E4B-it", "eval_loss": 3.892549}
+{"arm": "gemma-llebre-untrained", "model": "google/gemma-4-E4B-it", "eval_loss": 3.90323}
+{"arm": "qwen-trl-untrained", "model": "Qwen/Qwen3.5-9B", "eval_loss": 2.229429}
+{"arm": "qwen-unsloth-untrained", "model": "Qwen/Qwen3.5-9B", "eval_loss": 2.220992}
+{"arm": "qwen-llebre-untrained", "model": "Qwen/Qwen3.5-9B", "eval_loss": 2.229269}

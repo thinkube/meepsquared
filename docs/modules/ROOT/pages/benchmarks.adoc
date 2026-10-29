@@ -1,0 +1,168 @@
+= Benchmarks
+:page-type: reference
+
+_What Meep² was measured against, on which hardware, and how to measure it yourself._
+
+.TL;DR
+Every number here comes from a script in the repository's `benchmarks/` folder, run on public models and the public no_robots dataset. Each run records its command, its settings, its environment and its result in `benchmarks/results/`, and `benchmarks/README.md` gives the command of every row. Over one epoch on this year's architectures, Gemma 4 and Qwen 3.5, Meep² trains 2.2 to 2.9 times faster than Unsloth at its fastest setting and 3.9 to 5.7 times faster than TRL at its defaults, and the three engines' adapters reach the same held-out loss. On Llama 3.1, Meep² is slightly slower than Unsloth at its fastest.
+
+== How it was measured
+
+* *Dates and versions:* 25 to 28 October 2026. Meep² at commit `1375994` for the speed runs and `7971242` for the held-out runs (then named llebre), transformers 5.20.2, TRL 1.16.0, PEFT 0.21. Unsloth 2026.10.7 with unsloth_zoo 2026.10.7, transformers 5.17.0, TRL 0.29.1: Unsloth's releases up to 2026.10.10 require transformers 5.17 or older. PyTorch 2.11 in NVIDIA's container (NGC 26.03).
+* *Data:* HuggingFaceH4/no_robots; 30 steps of 8 conversations, at most 1,024 tokens each. Every arm trains the same conversations in the same batches in the same order: Meep²'s training job lays the batches out with the trainer's own seeded sampler, and the other arms use that sampler. The training losses of the arms agree to the third decimal. No_robots's conversations are short and vary a lot in length, which is where packing without padding gains most; on data of even lengths Meep²'s lead is smaller.
+* *Settings:* LoRA rank 16, alpha 16, no dropout, on the seven projections; 8-bit AdamW; constant learning rate 1e-4; BF16.
+* *Result:* training tokens per second, padding not counted, from step 11 to step 30; the mean of three runs, with the range of the three. In brackets, the peak GPU memory in GiB as PyTorch allocates it.
+* *Arms:* TRL with Transformers and PEFT at their default settings (padded batches, default attention, every layer checkpointed). Unsloth at its default (every layer checkpointed, activations offloaded to the CPU) and with checkpointing off, its fastest. Meep² at its default, `auto`: it measures the free memory and checkpoints only the layers it must, which on the GB10 is none. Meep² with every layer checkpointed is also given, to compare with TRL at equal checkpointing.
+* *Warm-up:* the first ten steps of a run are not measured. In a run's first minutes the steps are slower: the kernels compile, and on a machine whose memory the GPU shares, the system is still caching the model's files it just read. The seconds of every step are recorded (`s_by_step` in the results).
+* *Machine:* one NVIDIA GB10 (DGX Spark), 128 GB of memory shared between the CPU and the GPU. Activations an arm moves to the CPU (Unsloth's offload) stay in that same memory and do not show in its peak.
+
+== One epoch on one NVIDIA GB10
+
+No_robots' 9,100 training conversations, 1,137 steps of 8, the same batches in the same order in every arm, held-out loss every 100 steps. At the end, every adapter is measured by the same evaluation (TRL's), on 400 conversations it never trained on: each engine's own evaluation reads differently on these two models. Measured 29 October 2026; the results are `epoch.jsonl` and `epoch-shared-evaluation.jsonl` in `benchmarks/results/2026-10/`.
+
+[cols="2,2,1,1,1",options="header"]
+|===
+| Model | Engine | Minutes of training | Peak GPU memory, GiB | Held-out loss
+
+| Gemma 4 E4B | TRL, default settings | 141.2 | 19.3 | 1.9303
+| Gemma 4 E4B | Unsloth, fastest | 54.4 | 54.7 | 1.9326
+| Gemma 4 E4B | Meep² | *24.7* | 32.3 | *1.9295*
+| Qwen 3.5 9B | TRL, default settings | 137.8 | 21.6 | 1.7815
+| Qwen 3.5 9B | Unsloth, fastest | 101.4 | 90.7 | *1.7811*
+| Qwen 3.5 9B | Meep² | *35.5* | 39.5 | 1.7813
+|===
+
+Over the epoch, the gap is smaller than over 30 steps: on Gemma 4, Meep²'s compiled layers recompile on new batch lengths now and then, and its last third of steps runs 10% slower than its first; on Qwen 3.5, Unsloth's first 300 steps are its slowest, which the 30-step runs measured. Unsloth saves Qwen 3.5's adapter under its multimodal wrapper's names (`model.language_model.layers…`); for the shared evaluation they were renamed to the text model's (`model.layers…`), with the weights unchanged.
+
+== SFT on one NVIDIA GB10, 30 steps
+
+Training tokens per second, mean of three runs and their range; in brackets the peak GPU memory in GiB.
+
+[cols="3,1,1,1,1,1,1",options="header"]
+|===
+| Model, method | Released | TRL, defaults | Unsloth, default | Unsloth, fastest | Meep², every layer checkpointed | Meep², `auto`
+
+| Gemma 4 E4B, LoRA | Mar 2026 | 291 (19.3) | 577 (18.5), 575–579 | 769 (54.7), 758–776 | 1,401 (16.5) | *1,903* (29.8), 1,898–1,907
+| Qwen 3.5 9B, LoRA | Feb 2026 | 278 (21.6) | 278 (29.4)*, 249–300 | 387 (90.6)*, 373–395 | 930 (18.6) | *1,253* (36.1), 1,252–1,255
+| Gemma 4 E4B, QLoRA | Mar 2026 | 304 (12.9) | 553 (13.0) | 733 (49.2) | – | *1,738* (23.5), 1,731–1,748
+| Llama 3.1 8B Instruct, LoRA | Jul 2024 | 308 (20.0) | 1,125 (16.2), 1,026–1,206 | *1,662* (28.7), 1,642–1,683 | 1,195 (16.7) | 1,633 (28.5), 1,631–1,636
+| Llama 3.1 8B Instruct, QLoRA | Jul 2024 | 326 (9.5) | 1,068 (6.7) | *1,494* (19.1), 1,473–1,505 | – | 1,461 (18.7), 1,452–1,470
+|===
+
+{empty}* With Unsloth's compiler off (`UNSLOTH_COMPILE_DISABLE=1`), as its Qwen 3.5 runs needed in this environment. The result lines do not record that setting; the queue scripts in `benchmarks/results/queue/` do.
+
+Against Unsloth at its fastest, Meep² is 2.5 times faster on Gemma 4 (2.4 with QLoRA) and 3.2 times on Qwen 3.5, and level on Llama 3.1 (1.8% behind on LoRA, 2.2% on QLoRA, within the spread of Unsloth's runs). Against TRL at its defaults, Meep² is 6.5 times faster on Gemma 4, 4.5 on Qwen 3.5 and 5.3 on Llama 3.1; with every layer checkpointed in both, 3.9 times on Llama. TRL with its own speed options (packing without padding, FlashAttention, no checkpointing) was not measured.
+
+Gemma 4 E4B has 35 sliding-window layers and 7 global layers whose attention heads are 512 wide, wider than FlashAttention computes, and per-layer input embeddings. Qwen 3.5 9B computes 24 of its 32 layers with linear attention (gated DeltaNet). Meep² packs their batches without padding through all of these layers (on Gemma 4 with its own path on PyTorch's memory-efficient attention) and fuses their LoRA. Llama 3.1 is the standard architecture, where both engines are close to what the GPU can do.
+
+Unsloth's runs vary more than the others: 16% between its three Llama runs at its default, 18% on Qwen. Meep²'s and TRL's runs agree within 0.2 to 2.5%.
+
+== The same model as TRL
+
+200 steps of LoRA, the same batches in every arm; the held-out loss on the same 400 conversations of no_robots, never trained on, every 50 steps.
+
+[cols="2,1,1,1",options="header"]
+|===
+| Model | Seed | TRL | Meep²
+
+| Llama 3.1 8B Instruct | 42 | 1.6907 | 1.6905
+| Llama 3.1 8B Instruct | 43 | 1.6899 | 1.6914
+| Gemma 4 E4B | 42 | 1.9631 | 1.9622
+|===
+
+At step 200 Meep² and TRL are within 0.0015; at every evaluation (steps 50, 100, 150 and 200) within 0.0031. On Qwen 3.5 9B, the untrained model scores 2.2294 through TRL's evaluation and 2.2293 through Meep²'s.
+
+Unsloth's held-out loss is not comparable with these. Before any training, on the same 400 conversations, its evaluation scores Gemma 4 E4B 3.8925 (TRL 3.9051, Meep² 3.9032) and Qwen 3.5 9B 2.2210 (TRL 2.2294, Meep² 2.2293). After 200 steps its training losses match the other engines to the third decimal, and its held-out loss stays lower by about the same amount. On Llama 3.1 it matches: 1.6905 on seed 42 and 1.6906 on seed 43.
+
+== Frozen weights in FP8
+
+With `load_in_fp8=True` (a training job's `method="fp8"`, see xref:sft.adoc#_frozen_weights_in_fp8[Frozen weights in FP8]), the frozen weights are held as FP8; no other arm has such a mode. Single runs, at an earlier commit than the table above, Meep²'s defaults otherwise:
+
+[cols="2,1,1,1",options="header"]
+|===
+| Model | BF16 weights | FP8 weights | Training loss, steps 21–30, BF16 → FP8
+
+| Llama 3.1 8B Instruct | 1,650 (27.8) | 1,908 (21.3) | 1.857 → 1.862
+| Qwen 3.5 9B | 1,263 (35.2) | 1,411 (28.8) | 1.965 → 1.969
+|===
+
+Over 200 steps on Llama 3.1 8B, held-out loss after FP8 training was 1.6932 against 1.6899 in BF16 (+0.003), 12% faster and in 17% less memory, on an unfused setup used to compare number formats.
+
+== NVIDIA NeMo AutoModel on one NVIDIA GB10
+
+NeMo AutoModel is NVIDIA's training library, the one of NVIDIA's DGX Spark fine-tuning playbook. It ran in NVIDIA's container `nvcr.io/nvidia/nemo-automodel:26.08` (AutoModel 0.5.0, PyTorch 2.13) at the settings of the SFT table: Llama 3.1 8B Instruct in 16-bit, LoRA rank 16 on the seven projections, the same 240 conversations in the same order, 8 per step, up to 1,024 tokens each, 30 steps. The recipes are in `benchmarks/automodel`.
+
+[cols="2,1,1",options="header"]
+|===
+| Engine | Seconds per step | Peak memory, GiB
+
+| Meep², `auto` | 1.44 | 27.8
+| Meep², `memory` | 1.94 | 16.6
+| AutoModel | 5.68 | 60.0
+| AutoModel, with torch.compile and its fused cross-entropy | 6.89 | 49.0
+| AutoModel, with activation checkpointing | 10.16 | 31.1
+|===
+
+Single runs. AutoModel's recipe takes the conversations in their order in the dataset, while the Meep² rows took them in the trainer's shuffled order, so the steps do not hold the same conversations; AutoModel also uses its own optimizer (torch AdamW) and computes the loss on the answers only. The seconds are the mean of steps 10 to 29. With those differences, Meep²'s default step is 3.9 times shorter than AutoModel's fastest setup, in less than half the memory. AutoModel pads each batch to its longest conversation. Its packing option (`packed_sequence_size`) puts a different set of conversations in each step, so its steps would not compare with these; it is not measured. These are Meep²'s settings, not the playbook's: the playbook trains with a batch of 1 on another dataset.
+
+== Mixture of experts on one NVIDIA GB10
+
+Qwen3.6-35B-A3B (40 layers, 256 experts, 8 per token), LoRA rank 16 on the attention, the gated DeltaNet projections, the shared expert and every routed expert (942 M trainable parameters); 32 conversations of up to 1,024 tokens per step, padding-free, the loss on the answers; 30 steps, measured from the eleventh. Checkpointing is Meep²'s `auto` in every arm.
+
+[cols="3,1,1,1,1,1",options="header"]
+|===
+| Arm | Seconds per step | Training tokens per second | Peak memory, GiB | Layers checkpointed | Loss, step 30
+
+| Meep², routed LoRA, BF16 weights | 11.7 | 777 (773–779) | 78.8 | 38 of 40 | 1.915
+| Meep², routed LoRA, FP8 expert stacks | 10.9 | 857, single run | 61.2 | 32 of 40 | 1.917
+| PEFT's computation of the experts | 16.0 | 571 (569–575) | 80.1 | 38 of 40 | 1.917
+|===
+
+The routed computation runs the experts' products with Meep²'s own kernel (xref:mixture-of-experts.adoc#_the_kernel[The kernel]): one launch per product for all experts, the adapters inside it. On this GPU PyTorch's grouped matrix product runs as a loop of one product per expert, about 223,000 launches per step, and PEFT's computation of the experts goes through that loop; the routed computation is 1.36 times faster than it in BF16 (mean of three runs each) and 1.5 times with the expert stacks in FP8 (one run), at 1 and 19 GiB less.
+
+The FP8 stacks are the fastest arm as well as the smallest: the kernel reads them as they are, so the memory they save goes to six fewer recomputed layers, and nothing is paid for a dequantization. The loss at step 30 differs by 0.002 across the three arms, the same spread as between two runs of one arm.
+
+Before the kernel, with the products as PyTorch's loop runs them, the same settings gave 706 training tokens/s in BF16 (13.3 seconds per step) and 669 with FP8 stacks dequantized for each product (14.0 seconds, 59.8 GiB): the kernel is worth 13% in BF16 and 28% with FP8 stacks, measured at two commits in single runs. Unsloth is not in this table: it was not run on this data.
+
+== Two RTX 3090 without NVLink
+
+Two consumer GPUs of 24 GB on PCIe through the CPU, no NVLink; LoRA rank 16 on the seven projections, padding-free, 8 conversations of up to 1,024 tokens per GPU per step, 20 steps measured from the sixth. Two questions, each with the modes that answer it (xref:several-gpus.adoc[Several GPUs]).
+
+*A model that fits one GPU: what a second one buys.* DDP, one copy of the model per GPU and the adapters' gradients averaged.
+
+[cols="3,1,1,1,1",options="header"]
+|===
+| Model, method | GPUs | Training tokens per second | Seconds per step | Peak memory per GPU, GiB
+
+| Llama 3.1 8B Instruct, LoRA | 1 | 1,272 | 1.96 | 16.6
+| Llama 3.1 8B Instruct, LoRA | 2, DDP | 2,247 | 2.23 | 16.8
+| Qwen 3.8 27B, QLoRA | 1 | 355 | 7.62 | 20.2
+| Qwen 3.8 27B, QLoRA | 2, DDP | 633 | 8.57 | 20.6
+|===
+
+A second GPU gives 1.77 times the training tokens per second on Llama 3.1 8B and 1.78 on Qwen 3.8 27B in 4-bit, whose 4-bit copy fits each card. The step takes 12–14% longer than on one GPU: the adapters' gradients cross PCIe.
+
+*A model that does not fit one GPU: what trains it.* Qwen3-14B in BF16 is 29.5 GB of weights, more than a 24 GB card holds, so one GPU is not a row; FSDP2 shards every layer across the two GPUs, the split puts half the layers on each.
+
+[cols="3,1,1,1,1",options="header"]
+|===
+| Model, method | GPUs | Training tokens per second | Seconds per step | Peak memory per GPU, GiB
+
+| Qwen3-14B, LoRA | 2, FSDP2 | 466 | 10.1 (16 conversations) | 18.2 and 18.1
+| Qwen3-14B, LoRA | 2, layers split | 698 | 3.4 (8 conversations) | 15.2 and 15.2
+|===
+
+Single runs, with 16 conversations per FSDP2 step and 8 per split step. Both train the model; the split gave 1.5 times the training tokens per second and took 3 GiB less per GPU. Without NVLink, FSDP2 sends each layer's weights from one GPU to the other at every step, which costs more than the split's idle GPU; FSDP2 is the way when the model is too large for even half of it per GPU, or when more GPUs make the shards small. The DDP rows record the first GPU's peak; the GPUs hold the same in DDP.
+
+== Run them yourself
+
+Each benchmark has a notebook in `benchmarks/` that explains its settings, runs its script, and shows the results. The scripts run alone too:
+
+[source,bash]
+----
+cd benchmarks
+python sft.py --arm meepsquared --model meta-llama/Llama-3.1-8B-Instruct --method lora
+torchrun --nproc_per_node 2 multi_gpu.py --mode ddp --model meta-llama/Llama-3.1-8B-Instruct
+----
+
+`benchmarks/README.md` lists every script, its arguments and its requirements.

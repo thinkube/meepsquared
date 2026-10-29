@@ -1,0 +1,46 @@
+= GPUs that share the system's memory
+:page-type: concept
+
+_Loading a large model on an NVIDIA GB10 (DGX Spark) and other GPUs whose memory is the system's memory._
+
+.TL;DR
+Nothing to set. When a training job, or `from_pretrained`, loads a model whole onto a GPU that shares the system's memory, it reads each checkpoint shard straight to the GPU and drops its pages from the page cache, so a checkpoint is never held twice. The plan says so in its `loading` line:
+
+----
+  loading      shard by shard to GPU 0 (the GPU shares the system's memory)
+----
+
+On such a GPU, auto mode also reads the free memory the way the machine reports it: the system's available memory. It uses that figure to choose the micro-batch and the checkpointed layers.
+
+Before the weights load, PyTorch's allocator is capped at that available memory less 4 GiB, for the page cache and the machine's own daemons. The plan says so:
+
+----
+  allocator cap  102.1 GiB (the system's available memory less 4 GiB for the page cache and the machine's daemons; an overflow is this process's error, not the machine's)
+----
+
+== Overview
+
+Transformers opens each safetensors shard with `mmap` and builds the GPU tensors while the mapped pages are still in memory. On a discrete GPU those pages are system memory and the tensors are GPU memory. On a GPU that shares the system's memory, such as the GB10, both come out of the same memory: a 67 GB checkpoint needs about 134 GB, and the load runs out of memory, or the system starts to swap.
+
+Meep² detects such a GPU (PyTorch reports it as integrated) and, while it loads, has each shard read whole to the GPU and its pages dropped from the page cache. At most one shard is held twice. Qwen3.6-35B-A3B in BF16, 67 GB, loads in about a minute on a GB10.
+
+== When it applies
+
+* The model is loaded whole onto one GPU: always in a training job; with the lower-level calls, the default `device_map` or a `device_map` naming one GPU.
+* That GPU shares the system's memory.
+
+With `from_pretrained(device_map="cpu")`, `"balanced"` or `"auto"`, Transformers loads as usual.
+
+== Why the allocator is capped
+
+On a discrete GPU, a training that asks for more memory than the GPU has gets a CUDA out-of-memory error, in its own process. On a GPU that shares the system's memory there is no such line: the GPU's tensors come out of the same memory as the kernel, the page cache and every other process, and when it is gone the kernel's out-of-memory killer ends whatever process it picks, this one or another, after the machine has slowed to a halt. A training that takes too much can take a storage driver or a desktop with it.
+
+The cap turns that into an ordinary error. PyTorch's allocator refuses the allocation that would pass the cap, the training (or the plan, while it measures) gets an `OutOfMemoryError`, and the machine keeps the headroom. The headroom is 4 GiB: what the page cache needs for the files a training reads and writes, and the growth of the machine's own daemons while it runs. Those needs do not grow with the machine, so the headroom is a fixed amount, not a share. What the other processes already hold is not available, and so not in the cap either.
+
+The cap is set once per process, when the first model loads; `torch.cuda.set_per_process_memory_fraction` can change it afterwards.
+
+== Limits
+
+* Only the loading of model shards changes; other reads of safetensors files go to safetensors as usual.
+* The memory the model takes is still the system's memory: what other processes use on the machine is not available to training, and a process that starts after the cap was set is not counted in it.
+* The cap holds PyTorch's allocations. Memory taken outside it, such as a library's own CUDA buffers, is not capped; it is small next to the weights and the activations.

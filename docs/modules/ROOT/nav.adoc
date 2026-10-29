@@ -1,0 +1,17 @@
+* xref:index.adoc[Overview]
+* xref:get-started.adoc[Get started]
+* xref:training-job.adoc[Training jobs]
+* Guides
+** xref:sft.adoc[LoRA and QLoRA]
+** xref:mixture-of-experts.adoc[Mixture of experts]
+** xref:grpo.adoc[GRPO]
+** xref:several-gpus.adoc[Several GPUs]
+** xref:unified-memory.adoc[GPUs that share the system's memory]
+** xref:saving.adoc[Saving]
+* xref:from-unsloth.adoc[Coming from Unsloth]
+* Reference
+** xref:api.adoc[API]
+** xref:trainer-settings.adoc[Trainer settings]
+** xref:compatibility.adoc[Compatibility]
+* xref:benchmarks.adoc[Benchmarks]
+* xref:licensing.adoc[Licensing]

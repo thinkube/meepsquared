@@ -1,0 +1,115 @@
+= Get started
+:page-type: playbook
+
+_Install Meep² and train a first LoRA adapter._
+
+.TL;DR
+Install PyTorch 2.11 for CUDA 13.0, then `pip install meepsquared`, on Python 3.12 and an NVIDIA GPU of the Ampere generation or later. Or build the repository's container. Then run the example below: it prints the plan (what Meep² will do on your machine, and why), trains 30 steps, and saves the adapter.
+
+== Overview
+
+Meep² runs on an NVIDIA GPU of the Ampere generation or later (RTX 30 series or newer, A100, H100, the DGX Spark); it is tested on the GB10 and the RTX 3090. It needs Python 3.12 and PyTorch 2.11 with CUDA. It does not install PyTorch, so that it never replaces a PyTorch built for your GPU; pip installs everything else at the versions Meep² is tested with (xref:compatibility.adoc[Compatibility]).
+
+== Instructions
+
+. Install PyTorch 2.11 for CUDA 13.0, then Meep²:
++
+[source,bash]
+----
+pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130
+pip install meepsquared
+----
++
+FlashAttention is optional; without it, Meep² uses PyTorch's memory-efficient kernel, which is slower on Llama-style models.
++
+With the container, which has PyTorch 2.11, FlashAttention and Triton built for the GPU by NVIDIA, the DGX Spark's GB10 included: `docker build -t meepsquared -f meepsquared/Containerfile meepsquared` in the folder where you cloned the repository, then `docker run --rm -it --gpus all -e HF_TOKEN -v ~/.cache/huggingface:/root/.cache/huggingface -v "$PWD":/work -w /work meepsquared python train.py`. No prebuilt image is published, because NVIDIA's container comes under NVIDIA's license terms.
+
+. Train. This trains LoRA on Qwen3-8B with the no_robots conversations:
++
+[source,python]
+----
+import meepsquared as m2
+
+job = m2.TrainingJob(model="Qwen/Qwen3-8B", data="HuggingFaceH4/no_robots", method="lora", steps=30)
+
+print(job.plan())     # what meepsquared will do on this machine, and why; nothing is trained yet
+result = job.train()  # prints the plan, then trains
+result.save("qwen3-8b-adapter")
+----
++
+You give three things: the model, the data and the method. This is auto mode: Meep² measures the model, the batch and the machine, decides how to train on it, and says why in the plan. Use `method="qlora"` to hold the model's weights in 4 bits and use less memory.
+
+. Read the plan. `job.plan()` loads the model, adds LoRA, measures the memory one batch needs, and returns one line for each decision with its reason. For Llama 3.1 8B on an NVIDIA GB10, a plan starts like this:
++
+----
+meepsquared plan for meta-llama/Llama-3.1-8B-Instruct, LoRA, on NVIDIA GB10 (90 GiB free)
+  loading      shard by shard to GPU 0 (the GPU shares the system's memory)
+  weights      bfloat16 (method lora)
+  attention    flash_attention_2 (FlashAttention 2 with packed sequences)
+  batches      packed, no padding (the attention (flash_attention_2) keeps the examples apart)
+  ...
+----
++
+To change a decision, give it in the job: `recipe=m2.Recipe(...)` for the training choices (LoRA rank, learning rate, batch, schedule), `overrides=m2.Overrides(...)` for the hardware choices (kernels, checkpointed layers, micro-batch). The plan then marks the choice as yours, and shows next to it what Meep² would have chosen. xref:training-job.adoc[Training jobs] lists every field.
+
+. Read the banner. While the model loads, Meep² prints the GPU, the versions it found, how the model's weights are held, and whether Liger and padding-free batches are on; when one is off, it says why. For a 4-bit Llama-type model on an NVIDIA GB10:
++
+----
+  (\  /)     meepsquared 0.1.0: fast LoRA and QLoRA on Transformers, PEFT and TRL
+   \\//      GPU: NVIDIA GB10 (sm_121). PyTorch 2.11.0a0. Transformers 5.17.0. TRL 1.16.0
+   (o.o)     Model: llama, 4-bit NF4 computing in bfloat16. Liger: on. Padding-free: on
+  o(")(")    Apache-2.0: https://github.com/thinkube/meepsquared
+----
++
+`MEEPSQUARED_QUIET=1` in the environment turns off the banner and the plan that `job.train()` prints. `print(job.plan())` still prints the plan.
+
+. Or write the same job as YAML, and run it with the `meepsquared` command that pip installed:
++
+[source,yaml]
+----
+# job.yaml
+model: Qwen/Qwen3-8B
+data: HuggingFaceH4/no_robots
+method: lora
+steps: 30
+----
++
+[source,bash]
+----
+meepsquared train job.yaml --plan-only   # print the plan and stop
+meepsquared train job.yaml               # print the plan, train, and save the adapter in the output folder
+----
++
+The output folder is named after the model and the task (`Qwen3-8B-SFT` here) unless the job gives `output`.
+
+. For GRPO with vLLM generating inside the trainer, install the vLLM that matches your PyTorch build: xref:grpo.adoc#_installing_vllm[Installing vLLM].
+
+. Continue with the https://github.com/thinkube/meepsquared/tree/main/notebooks[tutorial notebooks]: `01-lora-sft.ipynb` is this training with the data, the loss and the saved adapter explained, and the notebooks after it cover FP8 weights, a mixture of experts, GRPO and several GPUs.
+
+== Troubleshooting
+
+[cols="1,2",options="header"]
+|===
+| You see | Do
+
+| `Padding-free: off (attention is sdpa)`
+| Do not set `Overrides(attention=...)`: auto mode chooses FlashAttention 2 or `meepsquared_varlen`, which both train padding-free.
+
+| `Padding-free: off (linear-attention layers need TRL 1.16 or later and flash-linear-attention)`
+| Install TRL 1.16 or later, and flash-linear-attention with `fla-core`.
+
+| `Liger Kernel has no patches for model type ...`
+| Set `overrides=m2.Overrides(liger=False)`; the model trains without Liger's kernels.
+
+| `one example (...) does not fit with every layer checkpointed`
+| Lower `Recipe(max_length=...)`, or use `method="qlora"`.
+
+| `selective_layers=...: the layers are compiled` (or another refusal)
+| Selective recomputation does not combine with compiled layers, linear-attention layers or a FlashAttention older than 2.7. Set `Overrides(compile_layers=False)`, or leave `selective_layers` to auto mode, which leaves it out where it is refused.
+
+| `auto mode measures the GPU's memory ... and the model is on cpu`
+| Auto mode needs a CUDA GPU to measure. On a machine without one, set `Overrides(micro_batch=..., checkpointed_layers=...)`.
+
+| `SFTTrainer does not support nn.DataParallel`
+| Launch with `torchrun` for several GPUs; with one process, Meep² trains on the model's GPU, and this appears only for a model Meep² did not load.
+|===

@@ -1,0 +1,92 @@
+00:03:12 started smoke gemma meep 20 steps job 07b0c70e-82d1-4461-a683-6b5847c81923 kernel llebre
+00:08:12 smoke gemma meep 20 steps completed 
+    00:04:45 sft.py --arm llebre --label gemma-meep --attn auto --checkpointing plan --model google/gemma-4-E4B-it --method lora --source thinkube --steps 20 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-parity.json --eval-rows 400 --eval-every 10 --save-adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/smoke-gemma-meep --results /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/epoch-smoke.jsonl --progress /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/progress-gb10
+    RESULT {"benchmark": "sft", "arm": "gemma-meep", "attn": "llebre_varlen", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 42}, "fused": true, "compiled": true, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit",
+    00:07:47 EXIT 0
+00:08:13 started smoke gemma unsloth 20 steps job 4c06592d-de8e-4f3e-9c0f-a9ac890db0ca kernel unsloth-conv1d
+00:18:14 smoke gemma unsloth 20 steps completed 
+    00:09:48 sft.py --arm unsloth --label gemma-unsloth-fastest --checkpointing false --model google/gemma-4-E4B-it --method lora --source thinkube --steps 20 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-parity.json --eval-rows 400 --eval-every 10 --save-adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/smoke-gemma-unsloth --results /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/epoch-smoke.jsonl --progress /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/progress-
+    RESULT {"benchmark": "sft", "arm": "gemma-unsloth-fastest", "attn": null, "checkpointing": "false", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedule
+    00:17:33 EXIT 0
+00:18:14 started smoke gemma meep shared evaluation job 02369c9d-0f49-49d4-bb31-b6f90ed15763 kernel llebre
+00:24:20 smoke gemma meep shared evaluation completed 
+    00:19:48 sft.py --arm trl --label smoke-gemma-meep-eval-trl --model google/gemma-4-E4B-it --method lora --source thinkube --steps 1137 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-parity.json --eval-rows 400 --eval-only --adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/smoke-gemma-meep
+    RESULT eval-only {"arm": "smoke-gemma-meep-eval-trl", "model": "google/gemma-4-E4B-it", "adapter": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/smoke-gemma-meep", "eval_loss": 2.26428}
+    00:23:23 EXIT 0
+00:24:21 started smoke gemma unsloth shared evaluation job 7c2b135e-2a5c-460b-aa76-ec5682036bd0 kernel llebre
+00:30:21 smoke gemma unsloth shared evaluation completed 
+    00:25:56 sft.py --arm trl --label smoke-gemma-unsloth-eval-trl --model google/gemma-4-E4B-it --method lora --source thinkube --steps 1137 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-parity.json --eval-rows 400 --eval-only --adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/smoke-gemma-unsloth
+    RESULT eval-only {"arm": "smoke-gemma-unsloth-eval-trl", "model": "google/gemma-4-E4B-it", "adapter": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/smoke-gemma-unsloth", "eval_loss": 2.264511}
+    00:29:31 EXIT 0
+00:30:21 started plan gemma epoch job 48f68b86-19df-41eb-ace0-1a02af45cd2a kernel llebre
+00:34:22 plan gemma epoch completed 
+    RESULT plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-epoch.json
+    00:33:35 EXIT 0
+00:34:23 started plan qwen epoch job 689f89a1-0f17-48f2-91ff-fa3eb03182a4 kernel llebre
+00:38:25 plan qwen epoch completed 
+    RESULT plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-epoch.json
+    00:37:48 EXIT 0
+00:38:25 started gemma meep epoch job e56b52ce-facb-4112-af2e-8eebf42f9c60 kernel llebre
+01:10:42 gemma meep epoch completed 
+    00:39:59 sft.py --arm llebre --label gemma-meep --attn auto --checkpointing plan --model google/gemma-4-E4B-it --method lora --source thinkube --steps 1137 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-epoch.json --eval-rows 400 --eval-every 100 --save-adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/gemma-meep --results /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/epoch.jsonl --progress /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/progress-gb10.txt
+    01:10:33 EXIT 0
+01:10:42 started qwen meep epoch job 72036b99-cd00-4ad2-98e8-2b0276cd0b24 kernel llebre
+01:57:07 qwen meep epoch completed 
+    01:12:18 sft.py --arm llebre --label qwen-meep --attn auto --checkpointing plan --model Qwen/Qwen3.5-9B --method lora --source thinkube --steps 1137 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-epoch.json --eval-rows 400 --eval-every 100 --save-adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-meep --results /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/epoch.jsonl --progress /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/progress-gb10.txt
+    01:56:03 EXIT 0
+01:57:07 started gemma unsloth epoch job 82be5199-0419-4a3b-9e0f-6481b7c33d12 kernel unsloth-conv1d
+03:27:05 gemma unsloth epoch lost at step 1126: JupyterHub's idle culler stopped its server (no output for an hour); queue stopped by hand and restarted from it with a runner that prints while it runs
+03:27:05 started gemma unsloth epoch job 42969ce1-ca31-4ebc-b617-36ac856c4428 kernel unsloth-conv1d
+04:39:36 gemma unsloth epoch completed 
+    03:28:41 sft.py --arm unsloth --label gemma-unsloth-fastest --checkpointing false --model google/gemma-4-E4B-it --method lora --source thinkube --steps 1137 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-epoch.json --eval-rows 400 --eval-every 100 --save-adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/gemma-unsloth --results /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/epoch.jsonl --progress /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/progress-gb10.txt
+    04:38:41 EXIT 0
+04:39:36 started qwen unsloth epoch job 5d758222-734e-419e-beef-b41cfb871ee3 kernel unsloth-conv1d
+06:51:48 qwen unsloth epoch completed 
+    04:41:14 run_env.py UNSLOTH_COMPILE_DISABLE=1 -- sft.py --arm unsloth --label qwen-unsloth-fastest --checkpointing false --model Qwen/Qwen3.5-9B --method lora --source thinkube --steps 1137 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-epoch.json --eval-rows 400 --eval-every 100 --save-adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-unsloth --results /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/epoch.jsonl --progress /home/thinkube/thinkube/notebooks/llebre/benchmarks/res
+    06:51:14 EXIT 0
+06:51:48 started gemma trl epoch job fdca206c-d653-4405-961d-c840c5ecbc93 kernel llebre
+09:39:18 gemma trl epoch completed 
+    06:53:45 sft.py --arm trl --label gemma-trl --model google/gemma-4-E4B-it --method lora --source thinkube --steps 1137 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-epoch.json --eval-rows 400 --eval-every 100 --save-adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/gemma-trl --results /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/epoch.jsonl --progress /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/progress-gb10.txt
+    09:38:45 EXIT 0
+09:39:18 started qwen trl epoch job 359c2c01-7cc8-466d-aa99-8ceb46e27c25 kernel llebre
+12:26:49 qwen trl epoch completed 
+    09:41:04 sft.py --arm trl --label qwen-trl --model Qwen/Qwen3.5-9B --method lora --source thinkube --steps 1137 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-epoch.json --eval-rows 400 --eval-every 100 --save-adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-trl --results /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/epoch.jsonl --progress /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/progress-gb10.txt
+    12:26:04 EXIT 0
+12:26:49 started gemma meep shared evaluation job 9514e0e5-6422-484d-ae0f-f793836dd8a6 kernel llebre
+12:33:53 gemma meep shared evaluation completed 
+    12:28:33 sft.py --arm trl --label gemma-meep-eval-trl --model google/gemma-4-E4B-it --method lora --source thinkube --steps 1137 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-epoch.json --eval-rows 400 --eval-only --adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/gemma-meep
+    loaded 516 adapter weights from /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/gemma-meep
+    RESULT eval-only {"arm": "gemma-meep-eval-trl", "model": "google/gemma-4-E4B-it", "adapter": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/gemma-meep", "eval_loss": 1.929496}
+    12:33:33 EXIT 0
+12:33:53 started gemma unsloth shared evaluation job 02bf02df-4abc-4940-a42a-5a1c1ae1b5da kernel llebre
+12:40:56 gemma unsloth shared evaluation completed 
+    12:35:38 sft.py --arm trl --label gemma-unsloth-eval-trl --model google/gemma-4-E4B-it --method lora --source thinkube --steps 1137 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-epoch.json --eval-rows 400 --eval-only --adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/gemma-unsloth
+    loaded 516 adapter weights from /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/gemma-unsloth
+    RESULT eval-only {"arm": "gemma-unsloth-eval-trl", "model": "google/gemma-4-E4B-it", "adapter": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/gemma-unsloth", "eval_loss": 1.932564}
+    12:40:38 EXIT 0
+12:40:56 started gemma trl shared evaluation job cad2df0e-3aeb-4319-8cbe-d94bc5daa3ac kernel llebre
+12:48:00 gemma trl shared evaluation completed 
+    12:42:35 sft.py --arm trl --label gemma-trl-eval-trl --model google/gemma-4-E4B-it --method lora --source thinkube --steps 1137 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-epoch.json --eval-rows 400 --eval-only --adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/gemma-trl
+    loaded 516 adapter weights from /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/gemma-trl
+    RESULT eval-only {"arm": "gemma-trl-eval-trl", "model": "google/gemma-4-E4B-it", "adapter": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/gemma-trl", "eval_loss": 1.930289}
+    12:47:35 EXIT 0
+12:48:00 started qwen meep shared evaluation job ede43841-2a39-49f0-9476-f035e44c0784 kernel llebre
+12:55:04 qwen meep shared evaluation completed 
+    12:49:31 sft.py --arm trl --label qwen-meep-eval-trl --model Qwen/Qwen3.5-9B --method lora --source thinkube --steps 1137 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-epoch.json --eval-rows 400 --eval-only --adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-meep
+    loaded 256 adapter weights from /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-meep
+    RESULT eval-only {"arm": "qwen-meep-eval-trl", "model": "Qwen/Qwen3.5-9B", "adapter": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-meep", "eval_loss": 1.781286}
+    12:54:31 EXIT 0
+12:55:04 started qwen unsloth shared evaluation job 6f9b4b43-1dee-4f4b-8197-4538696514ae kernel llebre
+13:02:08 qwen unsloth shared evaluation error cell 2 raised SystemExit: 1
+    12:56:37 sft.py --arm trl --label qwen-unsloth-eval-trl --model Qwen/Qwen3.5-9B --method lora --source thinkube --steps 1137 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-epoch.json --eval-rows 400 --eval-only --adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-unsloth
+    /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-unsloth: 256 of 256 adapter weights have no module in this model, such as base_model.model.model.language_model.layers.0.mlp.down_proj.lora_A.weight
+    13:01:37 EXIT 1
+    /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-unsloth: 256 of 256 adapter weights have no module in this model, such as base_model.model.model.language_model.layers.0.mlp.down_proj.lora_A.weight
+failed: qwen unsloth shared evaluation - the chain goes on
+13:02:08 started qwen trl shared evaluation job d8f71122-b2a4-4608-b0df-5672d763a18d kernel llebre
+13:09:12 qwen trl shared evaluation completed 
+    13:03:42 sft.py --arm trl --label qwen-trl-eval-trl --model Qwen/Qwen3.5-9B --method lora --source thinkube --steps 1137 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-epoch.json --eval-rows 400 --eval-only --adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-trl
+    loaded 256 adapter weights from /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-trl
+    RESULT eval-only {"arm": "qwen-trl-eval-trl", "model": "Qwen/Qwen3.5-9B", "adapter": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-trl", "eval_loss": 1.781475}
+    13:08:42 EXIT 0
+chain done; failed: ['qwen unsloth shared evaluation']

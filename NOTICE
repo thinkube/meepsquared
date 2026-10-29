@@ -1,0 +1,20 @@
+Meep² (meepsquared)
+Copyright Alejandro Martínez Corriá and the Thinkube contributors
+
+This product is licensed under the Apache License 2.0 (see LICENSE).
+
+It reproduces the public API of Unsloth (names and arguments of
+FastLanguageModel and FastModel) so that code written for Unsloth runs with
+it. It contains no code from Unsloth. Unsloth is a trademark of its owners;
+meepsquared is not affiliated with or endorsed by them.
+
+It includes the LoRA kernels of Axolotl (https://github.com/axolotl-ai-cloud/axolotl),
+v0.21.0, Apache License 2.0, in src/meepsquared/_vendor/axolotl/, with the changes
+listed in the README there. Axolotl's kernel module credits Unsloth for the
+inspiration of these kernels.
+
+At run time it uses, without copying their code:
+- Transformers, PEFT, TRL and Accelerate (Hugging Face, Apache License 2.0)
+- Liger Kernel (LinkedIn, BSD 2-Clause License)
+- bitsandbytes (MIT License), for QLoRA
+- FlashAttention (BSD 3-Clause License), when installed

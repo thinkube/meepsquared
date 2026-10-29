@@ -1,0 +1,221 @@
+= API
+:page-type: reference
+
+_Every public name of Meep² and its arguments._
+
+.TL;DR
+`import meepsquared as m2`. `m2.TrainingJob` describes a training job; `m2.Recipe` and `m2.Overrides` change Meep²'s choices; `job.plan()` returns an `m2.Plan` and `job.train()` an `m2.Result`. Under them are the lower-level calls: `m2.MeepLanguageModel` and `m2.MeepModel` load a model and add LoRA; `m2.fsdp_config` gives the FSDP2 settings; `meepsquared.chat_templates.train_on_responses_only` puts the loss on the answers. Importing Meep² also adjusts TRL's trainers; see xref:trainer-settings.adoc[Trainer settings].
+
+== TrainingJob
+
+`m2.TrainingJob(model, data=None, task="sft", method="lora", steps=None, epochs=None, rewards=None, output=None, split="train", report_to=None, eval_data=None, eval_split=None, eval_share=None, eval_every=None, timed_steps=None, tokenizer=None, recipe=Recipe(), overrides=Overrides())`. xref:training-job.adoc[Training jobs] explains each field and each default, with its source.
+
+[cols="1,1,3",options="header"]
+|===
+| Field | Default | Meaning
+
+| `model` | required | A Hugging Face model id, a local folder, or a model loaded with `MeepLanguageModel.from_pretrained` and without adapters. A loaded model also needs `tokenizer`, and `method` must match how it was loaded.
+| `data` | required | A Hugging Face dataset id, a local `.jsonl`, `.json` or `.parquet` file, or a `datasets.Dataset`. SFT takes conversations (`messages`), prompt and completion pairs (`prompt`, `completion`) or plain text (`text`); GRPO takes a `prompt` column.
+| `task` | `"sft"` | `"sft"` or `"grpo"`.
+| `method` | `"lora"` | `"lora"` (16-bit weights), `"qlora"` (4-bit weights) or `"fp8"` (FP8 frozen weights).
+| `steps`, `epochs` | one epoch | How long. Give one, not both.
+| `rewards` | required for GRPO | Reward functions as TRL takes them, or their names as `module:function` or `file.py:function`.
+| `output` | `<model name>-SFT` or `-GRPO` | The folder TRL writes checkpoints to.
+| `split` | `"train"` | The split of a Hugging Face dataset.
+| `report_to` | `None` | Where the trainer reports each step's metrics, as Transformers' `report_to` takes it: `"mlflow"`, or a list of names. `None` keeps Transformers' default, `"none"`.
+| `eval_data` | `None` | SFT only: evaluation data, as `data` takes it, or a `datasets.DatasetDict`. Not with `eval_share`.
+| `eval_split` | `"test"` for a dataset id | The split of `eval_data`; required for a `DatasetDict`, refused for a file or a `datasets.Dataset`.
+| `eval_share` | `None` | SFT only: the share of the training data held out for evaluation, above 0 and at most 0.5, chosen with the trainer's seed before the micro-batches are laid out, never trained on.
+| `eval_every` | about 10 evaluations over the planned steps | Optimizer steps between evaluations (and one at the last step). Needs `eval_data` or `eval_share`. See xref:training-job.adoc#_evaluation[Evaluation].
+| `timed_steps` | `3` on a GPU, none on the CPU | SFT only: the optimizer steps the plan times, after one to warm up, for its time per step; `0` times none. Set by hand, the steps are timed on the CPU too. See xref:training-job.adoc#_the_length_of_the_training[Training jobs].
+| `tokenizer` | `None` | The tokenizer, when `model` is a loaded model.
+| `recipe` | `Recipe()` | The training choices; see <<_recipe>>.
+| `overrides` | `Overrides()` | The hardware choices; see <<_overrides>>.
+|===
+
+[cols="1,3",options="header"]
+|===
+| Method | Does
+
+| `job.plan()` | Loads the model, adds LoRA, measures the memory and builds TRL's trainer; returns the <<_plan>>. Nothing is trained. A second call returns the same plan.
+| `job.train(resume=False, stop_file=None, status_file=None, stop_on_sigterm=False)` | Prints the plan (unless `MEEPSQUARED_QUIET=1`), trains, and returns the <<_result>>. A job trains once; make a new job to train again. `resume=True` continues from the latest checkpoint in the output folder; `stop_file`: when the file exists at the end of an optimizer step, the training saves a checkpoint and stops; `stop_on_sigterm`: a SIGTERM does the same; `status_file`: the training's state as JSON, written as it goes. Without `resume`, an output folder holding checkpoints is refused. See xref:training-job.adoc#_stopping_and_resuming[Stopping and resuming].
+| `job.trainer()` | TRL's `SFTTrainer` or `GRPOTrainer`, set up as `train()` runs it, not trained. A change you make to it, such as `train_on_responses_only`, is kept when `job.train()` runs.
+| `job.to_dict()`, `TrainingJob.from_dict(data)` | The job as plain data. A loaded model, a `datasets.Dataset`, a tokenizer and a reward function without an importable name cannot be written as data.
+| `job.to_yaml()`, `TrainingJob.from_yaml(path)` | The same as YAML.
+|===
+
+The command `meepsquared train job.yaml` (also `python -m meepsquared train job.yaml`) plans, trains and saves the adapter in the job's output folder.
+
+[cols="1,3",options="header"]
+|===
+| Option | Does
+
+| `--plan-only` | Prints the plan and stops; nothing is trained. Not with the options below.
+| `--json` | Prints the plan and the result as JSON.
+| `--status-file STATUS.json` | Writes the training's state as JSON, whole, at the start, after the plan, after every optimizer step, at each checkpoint and at the end: `state` (`planning`, `training`, `stopping`, `paused`, `completed` or `failed`), `step`, `total_steps`, `loss`, `seconds_per_step`, `eta_seconds` (both without the evaluations' time), `checkpoint`, `plan`, `error`, `eval_loss`, `eval_step` and `updated`.
+| `--stop-file STOP` | When this file exists at the end of an optimizer step, the training saves a checkpoint in the output folder and stops; the state is `paused`.
+| `--resume` | Continues from the latest checkpoint in the output folder: the optimizer, the scheduler and the next micro-batch. Refused when there is no checkpoint, naming the folder.
+|===
+
+A SIGTERM stops the training as the stop file does. The exit code is `0` when the training completed (the adapter is saved), `75` when it stopped when asked (a checkpoint is saved, and no adapter), and any other when it failed (the status file's `error` says why). See xref:training-job.adoc#_stopping_and_resuming[Stopping and resuming].
+
+What a training job does not do: FSDP2 and a model spread over several GPUs (under `torchrun` a job trains with DDP; see xref:several-gpus.adoc[Several GPUs]), and `GRPOConfig` settings outside the recipe, such as `beta`. For these, use the lower-level calls below.
+
+== Recipe
+
+`m2.Recipe(...)`: the training choices. A field left as `None` is chosen by auto mode, and the plan says how.
+
+[cols="1,1,3",options="header"]
+|===
+| Field | Auto mode | Meaning
+
+| `rank` | `16` | LoRA's rank.
+| `alpha` | the rank | LoRA's alpha; the update is scaled by alpha / rank.
+| `dropout` | `0` | LoRA's dropout.
+| `targets` | the seven projections | The module names LoRA adapts: `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`.
+| `learning_rate` | `1e-4`, `5e-5` from 30B parameters; with a token budget, these at 8 x 1024 tokens per update, times the square root of the budget's ratio to it | The peak learning rate. Taken as given, not scaled.
+| `schedule` | `"constant"` | `"constant"` after a warm-up, or `"cosine"`: decay to a tenth of the rate over the planned steps.
+| `warmup_steps` | 100, or 5% of the planned steps when fewer | The steps of the warm-up.
+| `effective_batch` | `8`, `16` above 13B parameters | Examples per update of the weights; for GRPO, completions per update.
+| `tokens_per_update` | off | SFT only: the batch as tokens per update instead; each update takes as many conversations as fit. `"auto"`: the largest budget that fits one forward pass, up to 32 x 1024 tokens; a number: that budget. Not with `effective_batch`. An option until the measurement round decides; see xref:training-job.adoc#_the_batch_in_tokens[Training jobs].
+| `optimizer` | `"adamw_8bit"` | A Transformers optimizer name.
+| `max_length` | `1024` | Tokens per example; for GRPO, the prompt and the completion.
+| `max_grad_norm` | `1.0`, TRL's config's default | The largest gradient norm; a larger gradient is scaled down to it.
+| `weight_decay` | `0.0`, TRL's config's default | The optimizer's weight decay.
+| `experts` | `False` | `True`: LoRA on every expert stack of a mixture of experts too, computed on the tokens routed to each expert. Takes no `dropout`; refused for a model without expert stacks. See xref:mixture-of-experts.adoc[Mixture of experts].
+| `answers_only` | on for conversations and prompt and completion pairs | SFT only: the loss on the answers alone, by TRL's assistant-only or completion-only loss, or by `train_on_responses_only` with markers read from the chat template. `True` on plain text is refused. See xref:training-job.adoc#_the_loss_on_the_answers[Training jobs].
+| `generations` | TRL's default | GRPO only: completions per prompt (TRL's `num_generations`).
+| `max_completion_length` | TRL's default | GRPO only: tokens per completion; less than `max_length`.
+| `temperature`, `top_p`, `top_k` | TRL's defaults | GRPO only: the sampling of the completions; `top_k=0` sets no limit.
+| `chat_template_kwargs` | TRL's default | GRPO only: arguments for the chat template, such as `{"enable_thinking": False}`.
+| `max_cut_share` | unset: reported only | SFT only: the largest share of examples whose answer tokens `max_length` may cut; a larger share is refused. See xref:training-job.adoc#_data_checks[Data checks].
+| `source_weights` | every row weighs 1 | SFT only: a weight above 0 for the loss of the rows of each origin kind (`"real"`, `"synthetic"`) of the data's `_origin` column, such as `{"synthetic": 0.5}`. Each micro-batch holds rows of one kind, and its loss is multiplied by the kind's weight. Needs an `_origin` column.
+|===
+
+`Recipe.from_dict(data)` and `recipe.to_dict()` read and write it as data.
+
+== Overrides
+
+`m2.Overrides(...)`: the hardware choices, set by hand. A field left as `None` is auto mode's. Meep² still measures, and the plan shows its own choice beside yours.
+
+[cols="1,1,3",options="header"]
+|===
+| Field | Auto mode | Meaning
+
+| `attention` | FlashAttention 2 where it runs the model, else `"meepsquared_varlen"` | The attention implementation `from_pretrained` loads, such as `"sdpa"`.
+| `liger` | on | Liger's kernels and fused loss.
+| `padding_free` | where the attention keeps the examples apart | SFT only: examples laid end to end without padding.
+| `fused_lora` | where the model's MLP has a fused kernel | The fused LoRA kernels.
+| `compile_layers` | where it pays | Each decoder layer compiled with `torch.compile`.
+| `checkpointed_layers` | as the measured memory needs | How many layers compute their whole forward again in the backward pass. Given alone, the other layers keep every activation.
+| `selective_layers` | as the measured memory needs | How many layers recompute only their cheap operations, keeping the outputs of their products. Given alone, as few layers as the memory needs recompute whole beside them. See xref:sft.adoc#_gradient_checkpointing[Gradient checkpointing].
+| `micro_batch` | the largest that fits | Examples per forward pass. It must divide the examples per update of each process. With a token budget, rows of `max_length` tokens: a forward pass holds up to that many tokens.
+| `vllm` | off | GRPO only: the completions generated by vLLM inside the training process (TRL's colocate mode). Needs TRL 1.16 or later and vLLM; refused with `method="fp8"`. See xref:grpo.adoc[GRPO].
+|===
+
+`Overrides.from_dict(data)` and `overrides.to_dict()` read and write it as data.
+
+== Plan
+
+`job.plan()` returns an `m2.Plan`. `str(plan)` (and `print(plan)`) gives the readable plan: one line for each decision, with its reason. `plan.to_dict()` gives the same as data: `model`, `task`, `method`, `device`, `free_bytes`, `decisions`, `seconds_per_step` and `estimated_seconds` (the timed time per step, and for the planned steps with the evaluations' estimated time; `None` when not timed), and `peak_gpu_bytes`, `peak_host_bytes` and `memory_request_bytes` (the GPU's peak reserved memory over the timed steps and the evaluation pass, `None` on the CPU; the process's peak resident memory; the memory a job's limit must cover, 10% over the peak, the GPU's added on a GPU that shares the system's memory when the host figure does not count it; all `None` when not timed). See xref:training-job.adoc#_the_memory_of_the_training[The memory of the training]. `plan["checkpointed_layers"]` returns one decision by its name.
+
+Each decision has `name`, `label`, `value`, `text`, `reason` and `by`: `"auto"` for auto mode's choice, `"user"` for yours. For yours, `auto_value` and `auto_text` say what auto mode would have chosen.
+
+== Result
+
+`job.train()` returns an `m2.Result`.
+
+[cols="1,3",options="header"]
+|===
+| Name | Meaning
+
+| `steps` | The updates the training made.
+| `seconds` | How long the training took.
+| `final_loss` | The last loss the trainer logged.
+| `peak_memory_bytes` | The most GPU memory PyTorch allocated during training; `None` on the CPU.
+| `output` | The job's output folder.
+| `paused` | `True` when the training stopped when asked (the stop file or a SIGTERM) before its last step, with a checkpoint saved.
+| `checkpoint` | The latest checkpoint in the output folder; `None` when there is none.
+| `evaluations` | Each evaluation, `{"step": ..., "eval_loss": ...}`, a resumed training's earlier sessions' too; empty without evaluation.
+| `save(path, merged=False)` | Writes the adapter; with `merged=True`, the base model with the adapter merged into 16-bit weights. See xref:saving.adoc[Saving].
+| `to_dict()` | The fields above as data.
+|===
+
+== MeepLanguageModel.from_pretrained
+
+The lower-level calls start here. A training job uses them underneath; use them directly for what a job does not cover, or for code coming from Unsloth (xref:from-unsloth.adoc[Coming from Unsloth]).
+
+Returns `(model, tokenizer)`.
+
+[cols="1,1,3",options="header"]
+|===
+| Argument | Default | Meaning
+
+| `model_name` | required | A Hugging Face model id or a local folder.
+| `max_seq_length` | `2048` | Recorded on the model as `max_seq_length`.
+| `dtype` | bfloat16, else float16 | The dtype of the weights, or the compute dtype with `load_in_4bit`.
+| `load_in_4bit` | `False` | QLoRA: NF4 weights with double quantization. Needs the `qlora` extra.
+| `load_in_fp8` | `False` | The frozen linear layers of the decoder held as FP8 (e4m3, one scale per tensor) once the adapters are added, their products on the FP8 tensor cores; on a mixture of experts, the expert stacks that carry adapters too, with one scale per expert, dequantized for each product. The routers stay in BF16. Not with `load_in_4bit`; needs compute capability 8.9 or later. See xref:sft.adoc[LoRA and QLoRA] and xref:mixture-of-experts.adoc[Mixture of experts].
+| `attn_implementation` | `"flash_attention_2"` where it runs the model, else `"meepsquared_varlen"`; `"sdpa"` without a CUDA GPU | Padding-free batches need `flash_attention_2`, `flash_attention_3` or `meepsquared_varlen` (PyTorch's memory-efficient kernel with packed sequences; see xref:sft.adoc#_the_attention[The attention]). A value given stands.
+| `liger` | `True` | Liger Kernel's fused layers and loss. A model type Liger has no patches for is refused unless `False`.
+| `loss_chunk_budget` | `32` | The chunk size factor of Liger's fused loss (`chunk_mem_const`). Applies to every model in the process.
+| `device_map` | the process's GPU | `"balanced"` or `"auto"` spread the layers over the GPUs; `"cpu"` for FSDP2. Otherwise GPU `LOCAL_RANK` under `torchrun`, else GPU 0.
+| `quant_storage` | `None` | The dtype the 4-bit weights are packed in; `torch.bfloat16` under FSDP2.
+| `token`, `trust_remote_code` | `None`, `False` | Passed to Transformers.
+| `fast_inference` | `False` | `True` is refused; see xref:grpo.adoc[GRPO].
+| `gpu_memory_utilization`, `max_lora_rank` | | Accepted and not used: they configure only `fast_inference`.
+|===
+
+Other keyword arguments go to Transformers' `AutoModelForCausalLM.from_pretrained`. The tokenizer is loaded with `legacy=False`; when it has no pad token, the end-of-sequence token stands as one.
+
+It prints a banner of what the model trains with; `MEEPSQUARED_QUIET=1` in the environment turns it off.
+
+== MeepLanguageModel.get_peft_model
+
+Returns a PEFT model. Takes only a model loaded by Meep²'s `from_pretrained`.
+
+[cols="1,1,3",options="header"]
+|===
+| Argument | Default | Meaning
+
+| `model` | required | The model from `from_pretrained`.
+| `r`, `lora_alpha`, `lora_dropout` | `16`, `16`, `0.0` | The adapter's rank, scale and dropout.
+| `target_modules` | the seven projections | `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`.
+| `bias`, `use_rslora`, `modules_to_save` | `"none"`, `False`, `None` | As in PEFT's `LoraConfig`.
+| `use_gradient_checkpointing` | `"auto"` | Which layers compute their forward again in the backward pass (non-reentrant): `"auto"` (or `"unsloth"`): one layer is measured on a micro-batch of the data's longest examples once the trainer has tokenized it (a training job measures the largest micro-batch it trains instead), and the cheapest layout that fits the free memory is chosen; `"memory"` or `True` for every layer recomputed whole, the least memory; `"selective"` for every layer recomputing only its cheap operations, keeping the outputs of its products (refused with compiled layers); `False` for none; a number of layers, or a fraction of them. See xref:sft.adoc#_gradient_checkpointing[Gradient checkpointing].
+| `random_state` | `3407` | The seed of the adapter's initial weights.
+| `fused_lora` | `"auto"` | Axolotl's fused LoRA kernels: `"auto"` where the kernels import and the MLP's activation has one; `True`, which refuses another activation; `False`. See xref:sft.adoc[LoRA and QLoRA].
+| `compile_layers` | `"auto"` | Each decoder layer compiled as one region with `torch.compile`, when the trainer is built: `"auto"` where it pays, `True`, `False`. See xref:sft.adoc[LoRA and QLoRA].
+|===
+
+Other keyword arguments go to PEFT's `LoraConfig`, for example `target_parameters`; see xref:mixture-of-experts.adoc[Mixture of experts].
+
+The model returned has `save_pretrained_merged(directory, tokenizer=None, save_method="merged_16bit")` and `push_to_hub_merged(repo_id, tokenizer=None, save_method="merged_16bit", token=None, private=None, commit_message="Upload model")`; see xref:saving.adoc[Saving].
+
+== MeepLanguageModel.for_inference and for_training
+
+`for_inference(model)` puts the model in evaluation mode, turns gradient checkpointing off, uncompiles the layers and turns the key-value cache on. `for_training(model, use_gradient_checkpointing=None)` turns them back as `get_peft_model` set them, or as given; an `"auto"` setting keeps the layout the trainer measured, and layers the trainer compiled are compiled again. So generating between `job.plan()` and `job.train()` leaves the model as the plan says.
+
+== MeepModel
+
+`MeepModel.from_pretrained` is `MeepLanguageModel.from_pretrained`. `MeepModel.get_peft_model` chooses the targets by kind of module when `target_modules` is not given:
+
+[cols="1,1,3",options="header"]
+|===
+| Argument | Default | Meaning
+
+| `finetune_language_layers` | `True` | `False` with no `target_modules` leaves nothing to train, and is refused.
+| `finetune_attention_modules` | `True` | `q_proj`, `k_proj`, `v_proj`, `o_proj`.
+| `finetune_mlp_modules` | `True` | `gate_proj`, `up_proj`, `down_proj`.
+| `finetune_vision_layers` | `False` | `True` is refused: vision layers are not trained.
+|===
+
+== fsdp_config
+
+`m2.fsdp_config(model, reshard_after_forward=True, cpu_ram_efficient_loading=False)` returns `SFTConfig`'s `fsdp` and `fsdp_config` for FSDP2, sharded by the model's decoder layer class. See xref:several-gpus.adoc[Several GPUs].
+
+== train_on_responses_only
+
+`meepsquared.chat_templates.train_on_responses_only(trainer, instruction_part, response_part)` returns the trainer, its data collator replaced by one that keeps the loss on the tokens after each `response_part` up to the next `instruction_part`. See xref:sft.adoc[LoRA and QLoRA].
+
+`meepsquared.chat_templates.turn_markers(tokenizer)` returns `(instruction_part, response_part)` read from the tokenizer's chat template, as a training job finds them: the text the template writes before a user turn, and before an answer. It raises `ValueError`, saying why, for a template they cannot be read from.

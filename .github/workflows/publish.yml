@@ -1,0 +1,26 @@
+name: Publish to PyPI
+
+# A tag vMAJOR.MINOR.PATCH publishes that version. PyPI accepts the upload by
+# Trusted Publishing: the project names this repository, this workflow and the
+# environment pypi as its publisher, so no token is stored anywhere.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: The tag and the package version are the same
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME, package version $version"; exit 1; }
+      - run: pip install build==1.3.0 && python -m build
+      - uses: pypa/gh-action-pypi-publish@v1.12.4

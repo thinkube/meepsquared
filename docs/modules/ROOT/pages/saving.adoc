@@ -1,0 +1,64 @@
+= Saving
+:page-type: concept
+
+_Saving a trained model: the adapter alone, or the base model with the adapter merged in._
+
+.TL;DR
+After a training job, `result.save("out")` saves the adapter, and `result.save("out", merged=True)` saves a full 16-bit model that any Transformers or vLLM server loads, from LoRA and QLoRA alike. With the lower-level calls, the model has `save_pretrained_merged` and `push_to_hub_merged`, which also uploads to a Hugging Face Hub repository.
+
+== After a training job
+
+[source,python]
+----
+result = job.train()
+result.save("qwen-adapter")                # the adapter alone
+result.save("qwen-tuned", merged=True)     # the base model with the adapter merged in, in 16 bits
+----
+
+`meepsquared train job.yaml` saves the adapter in the job's output folder when the training ends.
+
+`result.save` writes to a folder. To upload to the Hugging Face Hub, use the model of the job's trainer, which has the lower-level calls below:
+
+[source,python]
+----
+trainer = job.trainer()   # the trainer job.train() ran, with the trained model
+trainer.model.push_to_hub_merged("my-org/qwen-tuned", trainer.processing_class, save_method="merged_16bit",
+                                 token=hf_token)
+----
+
+== Save methods
+
+[cols="1,3",options="header"]
+|===
+| Method | Writes
+
+| The adapter: `result.save(path)`, or `save_method="lora"`
+| The adapter alone, as PEFT saves it. Small; it needs the base model to run.
+
+| Merged: `result.save(path, merged=True)`, or `save_method="merged_16bit"` (the default of `save_pretrained_merged`)
+| The base model with `W + scaling·B·A` in place of each adapted weight, computed in float32 and stored in the model's dtype. A 4-bit base (QLoRA) or an FP8 one is dequantized first, every such layer of it, so the result is an ordinary 16-bit model with no quantization settings. On a mixture of experts, each expert stack is written with its adapters merged, expert by expert; an FP8 stack is dequantized with its per-expert scale. The model is written tensor by tensor into safetensors shards of at most 5 GB, so the save needs the memory of one shard, not of the whole model: a 70 GB model saves on a machine that could not hold a second copy of it.
+|===
+
+== With the lower-level calls
+
+A model from `get_peft_model` has two methods:
+
+[source,python]
+----
+model.save_pretrained_merged("qwen-tuned", tokenizer, save_method="merged_16bit")
+model.push_to_hub_merged("my-org/qwen-tuned", tokenizer, save_method="merged_16bit", token=hf_token)
+----
+
+`push_to_hub_merged` creates the repository if it does not exist (`private=True` makes it private) and returns its URL.
+
+The model in memory does not change: training or generation can go on after a save.
+
+== Several processes
+
+In a run started with `torchrun`, every process calls `save_pretrained_merged` or `push_to_hub_merged`, and the first one writes or uploads; the others return at once (`push_to_hub_merged` returns `""` in them). When the model is sharded across the processes with FSDP2, the adapter's weights are gathered from all of them first, which is why every process has to make the call: one process alone would wait for the others forever. A merged save is refused in that case; see xref:several-gpus.adoc#_fsdp2[FSDP2].
+
+== Limits
+
+* A 4-bit merged save would lose precision and is refused; save 16-bit, then quantize with the tool of your serving backend.
+* GGUF export is not offered; convert a 16-bit save with llama.cpp's converter.
+* A merged save takes one active adapter, and refuses DoRA adapters and a model sharded across processes.

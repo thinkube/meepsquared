@@ -1,0 +1,102 @@
+= Several GPUs
+:page-type: concept
+
+_Training on two or more GPUs in one machine, such as consumer GPUs over plain PCIe without NVLink: DDP, FSDP2, or one model spread over the GPUs._
+
+.TL;DR
+If the model fits on one GPU, use DDP: `torchrun --nproc_per_node 2 train.py`, nothing else to set, with a training job or the lower-level calls. If it does not fit, use FSDP2 with `SFTConfig(..., **m2.fsdp_config(model))`, or QLoRA with DDP. `device_map="balanced"` spreads one model over the GPUs in one process, without speed gain.
+
+A training job (`m2.TrainingJob`) trains with DDP when you launch it with `torchrun`; see <<_a_training_job_on_several_gpus>>. FSDP2 and a model spread over the GPUs need Meep²'s lower-level calls: `MeepLanguageModel.from_pretrained`, `get_peft_model` and TRL's `SFTTrainer`, with the settings you give in `SFTConfig`.
+
+== Choosing a mode
+
+[cols="1,2,2",options="header"]
+|===
+| Mode | When | How
+
+| DDP
+| The model, with its activations, fits on one GPU. The fastest mode: each GPU trains on its own examples and they share only the adapter's gradients.
+| `torchrun --nproc_per_node N train.py`
+
+| FSDP2
+| The model does not fit on one GPU. Each GPU holds a share of every layer, and the GPUs send each other the rest of a layer as it runs.
+| `SFTConfig(..., optim="adamw_torch_fused", **m2.fsdp_config(model))`, launched with `torchrun`
+
+| QLoRA with DDP
+| A 4-bit copy of the model fits on one GPU. Faster than FSDP2 when it fits.
+| `from_pretrained(..., load_in_4bit=True)`, launched with `torchrun`
+
+| Spread (`device_map="balanced"`)
+| One process, the layers divided over the GPUs. The GPUs work in turn, so it trains at the speed of one GPU; it only makes room.
+| `from_pretrained(..., device_map="balanced")`, launched with `python`
+|===
+
+Without NVLink, consumer GPUs send each other data through the CPU's PCIe lanes. DDP sends only the adapter's gradients, which are small. FSDP2 sends weights at every layer of every step, so more examples per step spread that cost: give a larger `per_device_train_batch_size` than you would with DDP.
+
+== A training job on several GPUs
+
+Launch the script that runs the job with `torchrun`, one process per GPU:
+
+[source,bash]
+----
+torchrun --nproc_per_node 2 train.py        # train.py builds m2.TrainingJob(...) and calls job.train()
+torchrun --nproc_per_node 2 -m meepsquared train job.yaml
+----
+
+What a job does then, in each process:
+
+* It loads the whole model on its own GPU, the one `LOCAL_RANK` names.
+* It divides the effective batch among the processes (`WORLD_SIZE`). The effective batch must divide evenly; with 8 examples per update on 2 GPUs, each process trains 4 per update.
+* It measures the free memory of its own GPU, and chooses its micro-batch and checkpointed layers from that.
+* It builds TRL's trainer, which trains with DDP: each GPU computes its own examples, and the GPUs add up the adapter's gradients at each update. Meep² sets `ddp_find_unused_parameters=False`.
+* Each process prints the plan. `result.save()` and `meepsquared train` write the adapter from the first process only.
+
+If the GPUs differ, or one has less free memory, two processes can choose different micro-batches. They then make a different number of passes per update, and the training stops, each process waiting for the others. Set `Overrides(micro_batch=...)` so that all processes use the same.
+
+What a job does not do:
+
+* *FSDP2.* A job has no field for TRL's `fsdp` settings, and its default optimizer, 8-bit AdamW, cannot update the weights FSDP2 shards. Use the lower-level calls of <<_fsdp2>>.
+* *A model spread over the GPUs.* A job loads the whole model on one GPU per process; it has no `device_map`. Use `from_pretrained(..., device_map="balanced")` as in <<_a_model_spread_over_the_gpus>>.
+
+== DDP
+
+With the lower-level calls, nothing to set. Under `torchrun`, `from_pretrained` puts the model on the process's own GPU (`LOCAL_RANK`), and Meep² sets `ddp_find_unused_parameters=False`: every adapter takes part in every step, and the search for unused parameters fails with gradient checkpointing.
+
+== FSDP2
+
+[source,python]
+----
+import meepsquared as m2
+from trl import SFTConfig, SFTTrainer
+
+model, tokenizer = m2.MeepLanguageModel.from_pretrained("Qwen/Qwen3.8-27B", max_seq_length=1024,
+                                                          device_map="cpu")
+model = m2.MeepLanguageModel.get_peft_model(model, r=16, lora_alpha=16)
+args = SFTConfig(output_dir="out", per_device_train_batch_size=16, max_length=1024,
+                 optim="adamw_torch_fused", **m2.fsdp_config(model))
+----
+
+* Load the model on the CPU (`device_map="cpu"`), so that each GPU only receives its share.
+* `fsdp_config(model)` shards by the model's decoder layer class.
+* Meep² leaves `bf16` off: with it on, Accelerate turns the BF16 weights to FP32 before sharding, which doubles their memory and the traffic between the GPUs. The model is loaded in BF16 already. `bf16=True` given explicitly is refused.
+* bitsandbytes' 8-bit optimizers cannot update sharded parameters and are refused; use `adamw_torch_fused`. The optimizer state of LoRA is small.
+* For QLoRA under FSDP2, load with `load_in_4bit=True, quant_storage=torch.bfloat16` on each process's GPU (no `device_map="cpu"`), so that the 4-bit weights are packed in the dtype FSDP2 shards.
+* When the CPU memory of one machine cannot hold a copy of the model per process, give `fsdp_config(model, cpu_ram_efficient_loading=True)` and set `ACCELERATE_USE_FSDP=true` and `FSDP_CPU_RAM_EFFICIENT_LOADING=1` in the environment before loading: the first process reads the checkpoint and sends the others their share.
+* Save with `model.save_pretrained_merged(directory, tokenizer, save_method="lora")`, called by every process. The adapter's weights are sharded, so every process takes part in gathering them, and the first one writes. A merged save is refused here, because the base weights are not in one place: load the base model and the saved adapter on one GPU, and save merged from there.
+
+== A model spread over the GPUs
+
+`device_map="balanced"` (or `"auto"`) gives each GPU a run of layers. Between consumer GPUs without peer-to-peer access, a kernel launched on one GPU cannot read another's memory, so Meep² runs each part of the model with its own GPU as the current device, and computes the loss on the GPU of the output layer.
+
+== One process, several GPUs visible
+
+A process that trains a model on one GPU uses that GPU only, never `nn.DataParallel`, whatever number of GPUs it sees.
+
+== Several machines, such as two DGX Sparks
+
+Training across two machines is not tested yet. Everything on this page was measured on two RTX 3090 in one machine.
+
+Two DGX Sparks are two machines, linked by their ConnectX-7 network ports. A training across them is a multi-node launch, `torchrun --nnodes 2` on each Spark with the address of the first, and the gradients (DDP) or the weights (FSDP2) cross that network through NCCL. Meep² trains with TRL and Accelerate, which support multi-node DDP and FSDP2, and adds nothing specific to one node, so these are expected to work; a layer split is not, since it spreads one model over the GPUs of one process.
+
+FSDP2 across two Sparks would give 256 GB for one model: enough for LoRA on a 70B model in 16-bit, which one Spark cannot hold. If you run it, the repository's benchmark result issue is the place to report what you measured.
+

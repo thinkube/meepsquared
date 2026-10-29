@@ -1,0 +1,94 @@
+= Mixture of experts
+:page-type: concept
+
+_LoRA on the routed experts of a mixture-of-experts model, computed only on the tokens each expert receives._
+
+.TL;DR
+In a training job, `Recipe(experts=True)` puts LoRA on every expert; in the lower-level calls, name the expert stacks with `target_parameters` in `get_peft_model`. Meep² computes each expert's adapter on the tokens routed to that expert, never building the full weight of every expert, in one kernel launch per product; on a GB10 that is 1.36 times the speed of PEFT's own computation, and 1.46 times with the expert stacks held as FP8, at 19 GiB less.
+
+== A training job, or the lower-level calls
+
+A training job trains a mixture-of-experts model like any other, with LoRA on the modules in `Recipe(targets=...)`: by default the attention and MLP projections, which on a mixture of experts are the attention and the shared expert. The routed experts stay frozen. `Recipe(experts=True)` puts LoRA on every expert stack too:
+
+[source,python]
+----
+import meepsquared as m2
+
+job = m2.TrainingJob(
+    model="Qwen/Qwen3.6-35B-A3B", data="HuggingFaceH4/no_robots", method="fp8", steps=30,
+    recipe=m2.Recipe(
+        experts=True, effective_batch=32,
+        targets=["q_proj", "k_proj", "v_proj", "o_proj",       # full attention
+                 "in_proj_qkv", "in_proj_z", "out_proj",       # gated DeltaNet
+                 "gate_proj", "up_proj", "down_proj"]))        # shared expert
+print(job.plan())
+job.train().save("moe-adapter")
+----
+
+Meep² finds the expert stacks of the model (Transformers' experts modules) and names them to PEFT as `target_parameters`. The plan's `experts` line names the stacks, and says which code computes them on this GPU: Meep²'s kernel or PyTorch's grouped product (see <<_the_kernel>>).
+
+The lower-level calls do the same with `get_peft_model(..., target_parameters=[...])`, as the example below shows.
+
+== Overview
+
+In Transformers, the experts of a layer are stored as one stack of weights per projection (`mlp.experts.gate_up_proj`, `mlp.experts.down_proj`), not as separate linear layers. `target_modules` cannot reach them; PEFT's `target_parameters` can.
+
+PEFT then builds, at every forward and backward pass, the full weight `W + B·A` of every expert of the layer: on Qwen3.6-35B-A3B about 1 GB of weights per layer and pass, though each token reaches 8 of the 256 experts.
+
+Meep² runs the experts itself: for each expert, its rows of the sorted tokens against the base weight unchanged, plus each adapter's change computed on those rows only, two products whose inner size is the LoRA rank. The result is the same function of the inputs and the weights; only the full weights are never built. That is what lets the stacks be held as FP8 (below), and what the kernel fuses into one launch.
+
+== With the lower-level calls
+
+[source,python]
+----
+import meepsquared as m2
+
+model, tokenizer = m2.MeepModel.from_pretrained("Qwen/Qwen3.6-35B-A3B", max_seq_length=1024)
+model = m2.MeepModel.get_peft_model(
+    model, r=16, lora_alpha=16,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj",       # full attention
+                    "in_proj_qkv", "in_proj_z", "out_proj",       # gated DeltaNet
+                    "gate_proj", "up_proj", "down_proj"],         # shared expert
+    target_parameters=["mlp.experts.gate_up_proj", "mlp.experts.down_proj"])
+----
+
+Then train with TRL's `SFTTrainer`:
+
+[source,python]
+----
+from trl import SFTConfig, SFTTrainer
+
+trainer = SFTTrainer(model=model, processing_class=tokenizer, train_dataset=dataset,
+                     args=SFTConfig(output_dir="out", per_device_train_batch_size=32, max_length=1024,
+                                    learning_rate=1e-4, optim="adamw_8bit"))
+trainer.train()
+model.save_pretrained_merged("moe-adapter", tokenizer, save_method="lora")
+----
+
+With these calls you choose the batch, the learning rate and the optimizer in `SFTConfig`. The trainer still takes padding-free batches, Liger and the measured gradient checkpointing from the model; see xref:trainer-settings.adoc[Trainer settings]. The https://github.com/thinkube/meepsquared/tree/main/notebooks[tutorial notebook] `03-moe-experts.ipynb` trains with a training job and `Recipe(experts=True)`.
+
+== What Meep² sets up
+
+* *Routed LoRA* on every expert stack named in `target_parameters`. The rank is padded inside the computation to a multiple that the grouped matrix product accepts; the adapter keeps the rank you gave.
+* *Liger's SwiGLU off.* Liger replaces the forward of the MLP module, which PEFT has wrapped; with `target_parameters`, Meep² leaves that one kernel off. Liger's norms, RoPE and fused loss stay on.
+* *Padding-free batches*, as for a dense model. The gated DeltaNet layers of Qwen3.5 and Qwen3.6 need TRL 1.16 or later and flash-linear-attention; see xref:sft.adoc[LoRA and QLoRA].
+
+== Expert stacks in FP8
+
+With `from_pretrained(..., load_in_fp8=True)`, the expert stacks that carry adapters are held as FP8 (e4m3) with one scale per expert, as the frozen linear layers are (see xref:sft.adoc#_frozen_weights_in_fp8[Frozen weights in FP8]). The stacks are most of a mixture-of-experts model's weights, so its memory about halves: Qwen3.6-35B-A3B's 70 GB become about 37 GB. The kernel reads the FP8 stack as it is and converts each tile in registers; where the kernel does not run, a stack is dequantized to the compute dtype for each product and dropped again. The routers stay in BF16: their decisions should not move with the quantization. The xref:benchmarks.adoc#_mixture_of_experts_on_one_nvidia_gb10[benchmark] gives the numbers: on a GB10 the FP8 stacks are the fastest arm and the smallest.
+
+== The kernel
+
+PyTorch's grouped matrix product, which Transformers' experts use, has kernels of its own on compute capability 9.x and 10.x (Hopper, B200). On every other GPU, the GB10 and the RTX 30, 40 and 50 series among them, it runs as a loop of one product per expert: about 223,000 launches per step on Qwen3.6-35B-A3B, which bind the step to the CPU that launches them.
+
+There Meep² runs the experts' products with a Triton kernel of its own (`meepsquared._grouped`): one launch per product for all experts. Each expert's rows are tiled, no tile spans two experts, an expert without rows costs nothing. In the same loop over the input, the kernel accumulates the base product and the adapter's low-rank product from the tile of inputs already in registers, and applies the second low-rank product, the FP8 scale and the bias in the epilogue; the backward pass is the same kernel the other way round, plus a reduction kernel per adapter. Measured on a GB10 at the sizes of Qwen3.6-35B-A3B, a projection with adapters, forward and backward, takes 59 ms where the loop took 103 (gate and up) and 32 where it took 72 (down); the kernel as a single dense product reaches 97% of cuBLAS.
+
+An FP8 stack is read as FP8 and converted tile by tile in registers; the product itself runs in BF16. Running it on the FP8 tensor cores instead, with the activations quantized per row, was measured on the GB10 as slower (20 against 14 ms for a product of 262,144 rows) and 4% less exact, so it is off (`MEEPSQUARED_FP8_PRODUCTS=1` turns it on, for a measurement). The decision is by GPU: the kernel on compute capabilities where PyTorch loops, PyTorch's own kernels on 9.x and 10.x, which are not measured here. `MEEPSQUARED_GROUPED_KERNEL=0` or `1` overrides it, for a measurement. The design and its measurements are in the repository, `design/grouped-lora-kernel.md`.
+
+== Limits
+
+* `target_parameters` must name the expert stacks of a Transformers experts module; parameters of another module are refused.
+* `lora_dropout` must be 0 on expert stacks (in a job, `Recipe(dropout=...)` is refused with `experts=True`).
+* The router is not trained.
+* A merged save (`result.save(path, merged=True)`) writes each expert stack with its adapters merged in, an FP8 stack dequantized with its per-expert scale, shard by shard; see xref:saving.adoc[Saving].
+* Expert stacks held as FP8 compute with one active, unmerged adapter; disabling the adapters gives the base model.

@@ -1,0 +1,441 @@
+= Training jobs
+:page-type: reference
+
+_Say what to train. Meep² decides how, and tells you why._
+
+.TL;DR
+Describe the job with `m2.TrainingJob(model=..., data=..., method=..., steps=...)`. `job.plan()` shows what Meep² will do on this machine. `job.train()` trains and returns a result. `result.save("out")` writes the adapter. The same job can be written as YAML and run with `meepsquared train job.yaml`.
+
+== The idea
+
+A training job is one object. It says three things: the model, the data, and the method. Meep² makes the other choices. It loads the model, measures the memory one batch needs on your GPU, and chooses from what it measured. It prints each choice with its reason, before it trains.
+
+You can change any choice. The plan then marks it as yours, and shows next to it what Meep² would have chosen.
+
+[source,python]
+----
+import meepsquared as m2
+
+job = m2.TrainingJob(
+    model="meta-llama/Llama-3.1-8B-Instruct",
+    data="HuggingFaceH4/no_robots",    # a dataset id, a file, or a datasets.Dataset
+    method="lora",                      # "lora", "qlora" or "fp8"
+    steps=1000,                         # or epochs=1
+)
+
+print(job.plan())     # what meepsquared will do on this machine, and why; nothing is trained yet
+result = job.train()  # prints the plan, then trains with TRL
+result.save("out")    # the adapter; result.save("out", merged=True) for a 16-bit model
+----
+
+== What you give
+
+[cols="1,1,3",options="header"]
+|===
+| Field | Default | Meaning
+
+| `model` | required | A Hugging Face model id, a local folder, or a model loaded with `MeepLanguageModel.from_pretrained`. A loaded model also needs `tokenizer`, and the method must match how it was loaded.
+| `data` | required | A Hugging Face dataset id, a local `.jsonl`, `.json` or `.parquet` file, or a `datasets.Dataset`.
+| `task` | `"sft"` | `"sft"` (supervised fine-tuning: learn from examples) or `"grpo"` (reinforcement learning: learn from rewards).
+| `method` | `"lora"` | `"lora"` (16-bit weights), `"qlora"` (4-bit weights, less memory) or `"fp8"` (8-bit weights on GPUs of compute capability 8.9 or later).
+| `steps` or `epochs` | one epoch | How long to train. A step is one update of the weights. An epoch is one pass over the data. Give one of them, not both.
+| `rewards` | required for GRPO | The reward functions, as TRL takes them. In YAML, write each one as `module:function` or `file.py:function`.
+| `output` | `<model name>-SFT` | The folder TRL writes checkpoints to. `meepsquared train` also saves the adapter there.
+| `split` | `"train"` | The split of a Hugging Face dataset.
+| `report_to` | none | Where the trainer sends each step's metrics, such as `"mlflow"`, or a list of such names. It goes to Transformers' `report_to`. See <<_run_tracking>>.
+| `eval_data` | none | SFT only: evaluation data, in the forms `data` takes, or a `datasets.DatasetDict`. See <<_evaluation>>.
+| `eval_split` | `"test"` for a dataset id | The split of `eval_data`. Required for a `DatasetDict`; refused for a file or a `datasets.Dataset`, which have no splits.
+| `eval_share` | none | SFT only: instead of `eval_data`, the share of the training data held out for evaluation, above 0 and at most 0.5. Not with `eval_data`.
+| `eval_every` | about 10 evaluations | The optimizer steps between evaluations.
+| `timed_steps` | 3 on a GPU | The optimizer steps the plan times to state the training's length; `0` times none. See <<_the_length_of_the_training>>.
+| `recipe` | auto | The training choices, see <<_the_recipe>>.
+| `overrides` | auto | The hardware choices, see <<_overrides>>.
+|===
+
+The data holds one of three kinds of examples, as TRL reads them:
+
+* conversations, in a `messages` column;
+* prompt and completion pairs, in `prompt` and `completion` columns;
+* plain text, in a `text` column.
+
+For SFT, Meep² keeps only the columns of that kind. For GRPO the data needs a `prompt` column; the other columns stay, so that reward functions can read them.
+
+For conversations and for prompt and completion pairs, the loss counts the answers only: the model learns to write the answers, not the questions. Plain text has no answers, so every token counts. See <<_the_loss_on_the_answers>>.
+
+== The plan
+
+`job.plan()` loads the model, adds LoRA, measures the memory, and builds TRL's trainer exactly as `train()` will run it. Nothing is trained. It returns a plan with one line for each choice:
+
+----
+meepsquared plan for meta-llama/Llama-3.1-8B-Instruct, LoRA, on NVIDIA GB10 (90 GiB free)
+  loading      shard by shard to GPU 0 (the GPU shares the system's memory)
+  weights      bfloat16 (method lora)
+  attention    flash_attention_2 (FlashAttention 2 with packed sequences)
+  batches      packed, no padding (the attention (flash_attention_2) keeps the examples apart)
+  Liger        kernels and fused loss, without its SwiGLU: the fused LoRA MLP runs instead (from_pretrained's default)
+  fused LoRA   on (the model's MLP has a fused kernel)
+  compile      layers not compiled (FlashAttention runs outside them)
+  checkpoint   0 of 32 layers (one layer for the largest of the 30 micro-batches this job trains, 3,412 tokens (8 examples, end to end); the data's 8 longest would be 8,192: 0.27 GiB keeping everything, 0.14 selective, 0.01 recomputed whole; its forward and backward 31 / 34 / 41 ms in that order; free: 90 of 122 GiB)
+  selective    0 of 32 layers (recompute their cheap operations only, keeping the outputs of their products)
+  ...
+----
+
+The `data checks` line states what Meep² found in the data (see <<_data_checks>>). The `time` line states how long the training will take, and the `memory` line how much memory it needs; see <<_the_length_of_the_training>> and <<_the_memory_of_the_training>>.
+
+`plan.to_dict()` gives the same as data, for a program or a platform to show. Each decision has its `name`, its `value`, its `reason`, and `by`: `"auto"` or `"user"`. For the user's choices, `auto_value` and `auto_text` say what auto mode would have chosen.
+
+`job.trainer()` returns TRL's `SFTTrainer` or `GRPOTrainer`, set up as `train()` would run it, but not trained. Use it when you want TRL's full control.
+
+== The result
+
+`job.train()` prints the plan, trains, and returns a result:
+
+* `result.save(path)` writes the adapter (the small set of LoRA weights). `result.save(path, merged=True)` writes the model with the adapter merged into 16-bit weights. See xref:saving.adoc[Saving].
+* `result.to_dict()` gives `steps`, `seconds`, `final_loss` (the last loss logged), `peak_memory_bytes` (the most GPU memory PyTorch held while training), `output`, `paused` (the training stopped when asked; see <<_stopping_and_resuming>>), `checkpoint` (the latest checkpoint in the output folder, `None` when there is none) and `evaluations` (each evaluation as `{"step": ..., "eval_loss": ...}`; see <<_evaluation>>).
+
+== Evaluation
+
+An SFT job can measure its loss on data it does not train on, as it trains. Give one of:
+
+* `eval_data`: evaluation data apart, in the forms `data` takes (a dataset id, a file, a `datasets.Dataset`), or a `datasets.DatasetDict`. `eval_split` names its split: `"test"` by default for a dataset id; required for a `DatasetDict`; refused for a file or a `datasets.Dataset`, which have no splits. Its examples must be of the training data's kind.
+* `eval_share`: a share of the training data held out, above 0 and at most 0.5. The held-out rows are the first share of a permutation drawn with the trainer's seed (42), at least one, and at least one row is left to train. They are never trained on. They are held out before the micro-batches are laid out, so the batch measured for the memory is one of the rows trained.
+
+Both together are refused. With neither, the job does not evaluate.
+
+[source,yaml]
+----
+model: meta-llama/Llama-3.1-8B-Instruct
+data: HuggingFaceH4/no_robots
+eval_share: 0.05
+eval_every: 100
+steps: 1000
+----
+
+The evaluation runs every `eval_every` optimizer steps, and at the last step. Auto mode chooses about 10 evaluations over the planned steps: the planned steps divided by 10, rounded up, at least 1. A value you give is reported as yours, beside auto mode's.
+
+The evaluation loss is counted as the training loss is: TRL tokenizes the evaluation data with the training data's settings (the chat template, `max_length`), and the same data collator masks it, so the loss counts the answers only exactly where the training's does. The evaluation runs in batches of the training's micro-batch, without gradients, and keeps only the loss.
+
+The plan's `evaluation` line says the data, its rows and every how many steps it runs:
+
+----
+  evaluation   48 rows of HuggingFaceH4/no_robots, split train, held out with seed 42, every 100 steps (10 evaluations), the loss counted as the training's (about 10 evaluations over the 1000 planned steps)
+----
+
+The trainer logs each evaluation as `eval_loss`, so with `report_to="mlflow"` MLflow records it. The result's `evaluations` lists them, and the status file holds the latest (`eval_loss`, `eval_step`). A resumed training evaluates the same rows (the share is held out the same way), and its evaluations continue those of its earlier sessions.
+
+== Data checks
+
+For SFT, the plan checks the data with the model's tokenizer and chat template, after TRL has tokenized it. TRL tokenizes it whole, without cutting; Meep² then cuts each example to `max_length`, keeping its start, as TRL would.
+
+----
+  data checks  9,500 rows render; 61 longer than 1024 tokens, 12 of them with answer tokens cut; 3 without answer tokens, left out; no evaluation example is a training example; 20% of the training rows synthetic
+----
+
+Rendering:: An example the chat template or the tokenizer refuses, or one that makes no tokens, is refused. The message names the first rows (by their place in the data) and the first error.
+
+Length:: The examples longer than `max_length`, and those of them whose answer tokens run past it: the tokens the loss counts, which the cut drops. With the loss on every token, every longer example loses some. Reported by default: a long example still trains on its start. `Recipe(max_cut_share=...)` refuses a training whose share of examples with cut answers is larger. Reporting is the default because how much cutting is acceptable depends on the data, and a refusal by default would stop data that trains well; set the share to make it a check.
+
+No answer:: An example whose loss counts no token (with the loss on the answers, one without an answer) trains nothing and costs a forward pass. It is left out of the training and the evaluation, and reported.
+
+Overlap:: An evaluation example that is a training example is refused. The match is on the rendered text, normalized (Unicode NFKC, case folded, white space collapsed), and on the `_row` id when both sets have a `_row` column. With `eval_share`, rows repeated in the data are caught too.
+
+Origin:: The Datasets extension marks each row's origin in an `_origin` column: a mapping whose `kind` is `"real"` or `"synthetic"` (with the method and model that made it). The plan states the share of synthetic training rows. A synthetic evaluation row is refused: an evaluation is on real data. `eval_share` holds its rows out of the real rows. A row whose `_origin` has no kind is refused.
+
+`_row` and `_origin` are metadata. They are read for these checks, and never reach the tokenizer, the column mapping, the trainer or the model.
+
+The decision's `value` holds the counts and the first rows of each: `rows`, `longer`, `answers_cut`, `no_answer` and `eval_no_answer` (each `{"count", "rows"}`), `overlap` (0, or `None` without evaluation) and `synthetic_share` (`None` without `_origin`).
+
+=== Weighting the loss by origin
+
+`Recipe(source_weights={"synthetic": 0.5})` weights the loss of each row by its origin kind; a kind not given weighs 1. Each micro-batch then holds rows of one kind: Meep² cuts each epoch's shuffled order kind by kind, then shuffles the micro-batches with the same seed, so the kinds still mix through the training. A micro-batch's loss (its counted tokens' loss summed, divided by the count of counted tokens in the whole update, as Transformers counts it) is multiplied by its kind's weight. An update's gradient is then the weighted sum over its tokens. The evaluation loss is not weighted. Weights need an `_origin` column. The plan's `weights` line states them.
+
+== The length of the training
+
+On a GPU, the plan times a few optimizer steps and states how long the training will take:
+
+----
+  time         about 1.02 s per step, 17 min for 1000 steps (the median of 3 optimizer steps timed after 1 to warm up, each 8 forward and backward passes, on the largest micro-batch, 3,412 tokens (8 examples, end to end), and on the median one, 1,236 tokens (8 examples, end to end); each step priced on the line through the two at the mean micro-batch of the training, 1,402 tokens)
+----
+
+Each timed step is a whole optimizer step of the training as planned: the accumulation's forward and backward passes, the loss computed by the trainer as the training computes it (TRL's fused LM head or Liger's fused loss, which never build the full logits), with the checkpointed layers, kernels and compiled layers chosen; then the gradient is clipped and the optimizer steps. One step warms up first (memory, compiled code). The steps are timed twice: on the largest micro-batch the training runs, which also measures the memory, and on the median one. A step's time is a fixed part and a part per token, so the line through the two times prices a micro-batch of any size; the time per step is its price at the mean micro-batch of the training, whose micro-batches are all laid out ahead. When the two micro-batches are the same size, the steps are timed once.
+
+The timed steps on the largest micro-batch are also the check of the memory decision. Their real peak, the most PyTorch held during them, is compared with the budget: the GPU's memory, or the allocator's cap where there is one, less the 15% margin. A peak over the budget, or a step that runs out of memory, puts more layers to recompute whole, first as many more as the overshoot takes at one layer's measured activations and then every layer, and the steps are timed again; the plan's `checkpoint` line then says what was corrected and what the measurement had chosen. A layout given by hand (`Overrides(checkpointed_layers=...)`) is not changed: the plan stops with the figures instead.
+
+The timed steps do not change the training. They run with an optimizer of their own, of the same kind and settings, which is dropped afterwards. The trained weights are copied before and put back after, their gradients cleared, and the random number generators restored.
+
+With evaluation, `estimated_seconds` includes the evaluations' time. It is estimated from the batch count: an evaluation's batches on each process, times a forward pass without gradients, times the evaluations. The forward pass is timed after the steps (the median of `timed_steps` passes) on the evaluation's largest batch and its median one, and priced on the line through the two at its mean batch.
+
+`plan.to_dict()` gives the time as `seconds_per_step` and `estimated_seconds` (for all the planned steps).
+
+== The memory of the training
+
+The timed steps also measure the memory, so that a platform can size the job that runs the training:
+
+----
+  memory       peak 41.20 GiB on the GPU, 6.85 GiB on the host; a job should ask for 8 GiB (the host's peak; the GPU has memory of its own, 10% over it, rounded up to a whole GiB)
+----
+
+* The GPU's peak: the most memory PyTorch's allocator reserved (`torch.cuda.max_memory_reserved`), reset before the first timed step, over the timed steps and, with evaluation, the evaluation pass (a forward pass of the evaluation's largest batch without gradients).
+* The host's peak: the most resident memory the process has held since it started (`ru_maxrss`), so loading the model counts too.
+* The request: what a job's memory limit must cover, 10% over the peak, rounded up to a whole GiB. A GPU with memory of its own takes nothing from it: the request covers the host's peak. A GPU that shares the system's memory, such as the GB10, takes its memory from the job's. Meep² then checks whether the process's resident memory grew with the GPU's allocations during the timed steps (by at least half of them): if it did, the host's peak counts them, and the request covers it; if not, the request covers the host's peak plus the GPU's. The line says which.
+
+`plan.to_dict()` gives `peak_gpu_bytes` (`None` on the CPU), `peak_host_bytes` and `memory_request_bytes`. Without timed steps (on the CPU unless `timed_steps` is set by hand, with `timed_steps=0`, or for GRPO) the three are `None`, and the line says why. `TrainingJob(timed_steps=...)` sets how many steps are timed; `0` times none. On the CPU the plan is not timed, and says so, unless `timed_steps` is set by hand. GRPO's plan is not timed: its steps generate their completions, which timed training steps would leave out.
+
+== How Meep² chooses
+
+Each default below is printed in the plan with its source.
+
+LoRA:: Rank 16, and alpha equal to the rank. LoRA's update is scaled by alpha / rank, so this is a scaling of 1. LoRA goes on the attention projections (`q_proj`, `k_proj`, `v_proj`, `o_proj`) and the MLP projections (`gate_proj`, `up_proj`, `down_proj`).
+
+Optimizer:: 8-bit AdamW (`adamw_8bit`). It keeps a quarter of AdamW's memory for its state.
+
+Effective batch:: The effective batch is the number of examples in one update of the weights. Meep² takes the smallest that keeps the GPU busy: 8 for models of up to 13 billion parameters, and 16 above. LoRA learns less from large batches (Thinking Machines, "LoRA Without Regret", 2025); QLoRA used 16 up to 13B and 32 to 64 above (Dettmers et al., 2023, table 9). For SFT, `Recipe(tokens_per_update=...)` sets a budget of tokens per update instead. That is an option, off by default until the measurement round decides on it. See <<_the_batch_in_tokens>>.
+
+Learning rate:: 1e-4 for models of up to 13 billion parameters, and 5e-5 from 30 billion. Between the two, 1e-4. At a scaling of 1, published rates for 7B to 13B models are near 1e-4 (QLoRA used 2e-4 at a scaling of 0.25; Thinking Machines, 2025). QLoRA halved the rate from 33B parameters (Dettmers et al., 2023). With a token budget, the rate is scaled to the budget; see <<_the_batch_in_tokens>>. A rate you give is taken as given.
+
+Micro-batch and accumulation:: The micro-batch is the number of examples the GPU computes at once. Gradient accumulation adds several micro-batches into one update, so the batch per update stays the same. Meep² first tries the whole batch of one process as one micro-batch. For SFT, Meep² sets the order of the training data and lays out every micro-batch of the training ahead: each epoch shuffles the examples with the trainer's seed (42, Transformers' default) plus the epoch, and cuts them into micro-batches. With several processes, each process gets its share as Accelerate gives it: the micro-batches in turn, one to each process. The steps and epochs are counted as the trainer counts them, with the accumulation. Meep² measures the memory of the largest micro-batch in that layout with every layer checkpointed: with padding-free batches, its examples laid end to end; with padded batches, a row per example, each as long as its longest example. The trainer then trains exactly that layout, so no micro-batch it trains is larger than the one measured. If it does not fit in the free memory, Meep² halves the micro-batch, raises the accumulation, lays out the micro-batches again and measures again. The plan names the batch measured beside the data's longest examples, and the seed on the `order` line. With a token budget, each forward pass holds an equal share of the process's tokens, in as many conversations as fit, and the largest of those groups is measured. GRPO generates its sequences as it trains, so it measures at the bound, the micro-batch by `max_length`.
+
+Checkpointing:: A layer can keep every activation of its forward pass, recompute its whole forward in the backward pass (keeping only its input), or recompute selectively: keep the outputs of its large products and recompute the cheap operations around them. Recomputing saves memory and costs time. Meep² measures one layer on the batch above: the memory it holds in each of the three ways, and the time of its forward and backward pass in each. It then takes the cheapest layout that fits in the free memory less two things: the gradients and the optimizer's state of the trainable parameters, counted exactly from their number, their dtype and the optimizer (an adapter on every expert of a mixture of experts has hundreds of millions of them), and 15% of the GPU's memory for the loss, the workspaces and the backward pass's own buffers. On a GPU that shares the system's memory, the free memory is also bounded by the allocator's cap (see xref:unified-memory.adoc[GPUs that share the system's memory]). The layouts, in order: nothing recomputed; else as few layers recomputed selectively as needed; else every layer selective plus as few recomputed whole as fit, compared on the measured times with the layout without selective recomputation. See xref:sft.adoc#_gradient_checkpointing[Gradient checkpointing].
+
+Schedule:: The learning rate stays constant after a warm-up. The warm-up is 100 steps, or 5% of the planned steps when that is fewer. `Recipe(schedule="cosine")` instead lowers the rate along a cosine curve to a tenth of it at the last planned step. Which schedule is better will be measured, and the default will follow that measurement.
+
+Length of an example:: Up to 1024 tokens, TRL's default.
+
+The loss on the answers:: On for conversations and prompt and completion pairs, off for plain text. See <<_the_loss_on_the_answers>>.
+
+Experts:: LoRA on the attention and MLP projections only. On a mixture of experts, the routed experts stay frozen unless you set `Recipe(experts=True)`. See <<_lora_on_the_experts>>.
+
+Clipping and weight decay:: The defaults of TRL's config: the gradient norm clipped at 1, and no weight decay.
+
+Kernels and loading:: As `from_pretrained` and `get_peft_model` decide them in auto mode: padding-free batches where the attention keeps the examples apart, Liger's kernels, the fused LoRA kernels where the model's MLP has one, compiled layers where that pays, and loading shard by shard on a GPU that shares the system's memory. See xref:sft.adoc[LoRA and QLoRA] and xref:unified-memory.adoc[GPUs that share the system's memory].
+
+== The recipe
+
+`m2.Recipe` sets the training choices. A field you leave out is chosen as above.
+
+[cols="1,3",options="header"]
+|===
+| Field | Meaning
+
+| `rank`, `alpha`, `dropout` | LoRA's rank, alpha and dropout. Alpha follows the rank unless you set it.
+| `targets` | The names of the modules LoRA adapts.
+| `learning_rate` | The peak learning rate. Taken as given: Meep² does not scale it to the batch.
+| `schedule` | `"constant"` or `"cosine"`.
+| `warmup_steps` | The steps of the warm-up.
+| `effective_batch` | Examples per update of the weights. For GRPO, the number of completions.
+| `tokens_per_update` | SFT only, off unless set: the batch as a budget of tokens per update instead. `"auto"` measures the largest budget that fits; a number sets it. Each update takes as many conversations as fit it. Give `effective_batch` or `tokens_per_update`, not both. See <<_the_batch_in_tokens>>.
+| `optimizer` | A Transformers optimizer name, such as `"adamw_torch"`.
+| `max_length` | Tokens per example. For GRPO, the prompt and the completion together.
+| `max_grad_norm` | The largest gradient norm; a larger gradient is scaled down to it.
+| `weight_decay` | The weight decay of the optimizer.
+| `experts` | `True` puts LoRA on every routed expert of a mixture of experts too. See <<_lora_on_the_experts>>.
+| `answers_only` | `False` counts the loss on every token of a conversation. See <<_the_loss_on_the_answers>>.
+| `generations` | GRPO only: the completions generated for each prompt (TRL's `num_generations`).
+| `max_completion_length` | GRPO only: the most tokens of one completion.
+| `temperature`, `top_p`, `top_k` | GRPO only: how the completions are sampled. `top_k=0` sets no limit.
+| `chat_template_kwargs` | GRPO only: arguments for the chat template, such as `{"enable_thinking": False}`.
+|===
+
+== Overrides
+
+`m2.Overrides` sets the hardware choices by hand. Meep² still measures, and the plan shows its own choice beside yours.
+
+[cols="1,3",options="header"]
+|===
+| Field | Meaning
+
+| `attention` | The attention implementation `from_pretrained` loads, such as `"sdpa"`. Auto mode: FlashAttention 2 where it runs the model, else `"meepsquared_varlen"` (see xref:sft.adoc#_the_attention[The attention]).
+| `liger` | Liger's kernels and fused loss, on or off.
+| `padding_free` | SFT only: examples laid end to end without padding, on or off.
+| `fused_lora` | The fused LoRA kernels, on or off.
+| `compile_layers` | Each decoder layer compiled with `torch.compile`, on or off.
+| `checkpointed_layers` | How many layers are checkpointed.
+| `micro_batch` | Examples per forward pass. It must divide the examples per update of each process. With a token budget, it is rows of `max_length` tokens: a forward pass holds up to that many tokens, in as many conversations as fit.
+| `vllm` | GRPO only: `True` generates the completions with vLLM inside the training process. See <<_grpo>>.
+|===
+
+[source,python]
+----
+job = m2.TrainingJob(model="Qwen/Qwen3-8B", data="HuggingFaceH4/no_robots", method="lora",
+                     recipe=m2.Recipe(rank=32, learning_rate=2e-4),
+                     overrides=m2.Overrides(checkpointed_layers=8, compile_layers=False))
+----
+
+In the plan, a choice you made reads like this:
+
+----
+  checkpoint   8 of 36 layers (yours; auto: 0 of 36 layers, one layer: 0.84 GiB for 8 x 1024 tokens; free: 90 of 122 GiB)
+----
+
+== As data
+
+A job is plain data, so that a form or a platform can write it.
+
+[source,python]
+----
+data = job.to_dict()
+job = m2.TrainingJob.from_dict(data)
+text = job.to_yaml()
+job = m2.TrainingJob.from_yaml("job.yaml")
+----
+
+A loaded model, a `datasets.Dataset` and a reward function without an importable name cannot be written as data; `to_dict()` says which.
+
+[source,yaml]
+----
+model: meta-llama/Llama-3.1-8B-Instruct
+data: HuggingFaceH4/no_robots
+method: lora
+steps: 1000
+recipe:
+  learning_rate: 1e-4
+----
+
+Run it with the `meepsquared` command:
+
+[source,bash]
+----
+meepsquared train job.yaml --plan-only   # print the plan and stop
+meepsquared train job.yaml               # print the plan, train, and save the adapter in the output folder
+python -m meepsquared train job.yaml     # the same command
+----
+
+`--json` prints the plan and the result as JSON. `--status-file`, `--stop-file` and `--resume` run a training in sessions; see <<_stopping_and_resuming>>. Relative paths in the file (the data, a reward file) are read from the current folder.
+
+== The batch in tokens
+
+Conversations differ in length. A batch of 8 conversations can hold 800 tokens or 8,000. With a fixed number of conversations per update, the GPU does a different amount of work at every step, and each update learns from a different amount of text.
+
+A token budget fixes the amount of text instead. It is an option, off by default: the measurement round will decide whether it becomes the default. `Recipe(tokens_per_update=32768)` says: every update of the weights learns from about 32,768 tokens. `Recipe(tokens_per_update="auto")` lets Meep² choose: the largest budget that fits one forward pass on your GPU, up to 32 x 1024 tokens. Meep² fills each forward pass with conversations, in the order the trainer gives them, until the next one would go over the budget. A conversation is never split: a forward pass holds at least one, even one longer than the budget. Each conversation is still cut to `max_length` tokens, as always.
+
+This keeps the GPU busy. A forward pass of 32,768 tokens does the same work whether it holds 10 long conversations or 100 short ones. Packed batches (no padding) count the tokens of the conversations. Padded batches count the padding too: every conversation in the pass costs as much as the longest one, so a pass holds fewer when their lengths differ.
+
+The learning rate follows the budget. The stated rates hold for 8 x 1024 tokens per update, the batch the benchmarks measured. For another budget, Meep² scales the rate with the square root of the ratio, Adam's usual rule: a budget of 32 x 1024 tokens doubles it. A rate you give is taken as given. Without a budget, the rate is the stated one, not scaled.
+
+The plan says which way the batch is counted. With a budget, it reports the budget and why, how many conversations the first step holds, the tokens of each forward pass, the accumulation, and the learning rate with its scaling:
+
+----
+  batch        32,768 tokens per update, as many conversations as fit (41 in the first step) (Recipe(tokens_per_update='auto'): the largest that fits one forward pass, up to 32,768 tokens: ...)
+  micro-batch  up to 32,768 tokens per forward pass (32 x 1024) (...)
+  accumulation 1 micro-batches per update (tokens per update / (tokens per forward pass x processes))
+  learning rate 0.0002 (0.0001 at 8,192 tokens per update, x sqrt(32,768 / 8,192) = 2 for this batch (Adam's rule: the rate grows with the square root of the batch); ...)
+----
+
+Without a budget, the `batch` line reads `8 examples per update (...; batched by examples; Recipe(tokens_per_update='auto') batches by tokens instead)`.
+
+The number of conversations in an update is a training decision, not only a hardware one: LoRA learns less from large batches (Thinking Machines, 2025). So a measured budget has a ceiling, 32 x 1024 tokens, even where more fits. The ceiling is a first value. The time-to-quality study will set it, by measuring the held-out loss against the time trained at several budgets.
+
+Two details of the count. With a token budget, the number of forward passes in a pass over the data depends on the order of the conversations. Meep² lays out that order ahead, so the plan counts the passes of the first epoch as the trainer will run them. A later epoch, in another order, can have a few passes more or fewer than the first: the trainer counts every epoch by the first, so it ends a shorter epoch early and leaves the last passes of a longer one unseen. And the trainer's log of "examples per device" shows the rows of `micro_batch`, not the conversations of a batch.
+
+== The loss on the answers
+
+A conversation holds the user's words and the assistant's answers. The model should learn to write the answers. So by default the loss counts only the answer tokens, and the end-of-turn token after each answer, so that the model learns to stop. The plan line `loss on` says how:
+
+* *Prompt and completion pairs*: TRL's completion-only loss. The prompt is context.
+* *Conversations, where TRL can mask the chat template*: TRL's assistant-only loss. TRL masks the text that the chat template marks with `{% generation %}`. TRL 1.16 also has marked versions of common chat templates (Llama 3, Qwen 2.5 to 3.8, Gemma, and others), and uses them in training. Meep² checks that the mask keeps the end-of-turn token.
+* *Other conversations*: Meep²'s `train_on_responses_only`. Meep² reads from the chat template the text it writes before an answer and before a user turn, and checks that these markers find the answer. The plan shows the markers.
+* *Plain text*: every token counts.
+
+If neither way works for a chat template, `plan()` stops with an error that says why. `Recipe(answers_only=False)` then trains on every token.
+
+----
+  loss on      the answers only, by TRL's assistant-only loss (TRL's training version of the chat template)
+----
+
+== LoRA on the experts
+
+A mixture of experts (MoE) has many small MLPs, the experts, in each layer, and a router that sends each token to a few of them. Transformers stores the experts of a layer as one stack of weights per projection. `Recipe(experts=True)` puts LoRA on every one of these stacks too, besides the modules in `targets`:
+
+[source,python]
+----
+job = m2.TrainingJob(model="Qwen/Qwen3.6-35B-A3B", data="HuggingFaceH4/no_robots", method="fp8",
+                     recipe=m2.Recipe(experts=True, effective_batch=32))
+----
+
+Meep² computes each expert's adapter only on the tokens routed to that expert (Meep²'s routed LoRA). On GPUs where PyTorch's grouped product is a loop over the experts (the GB10, and the RTX 30, 40 and 50 series), one kernel of Meep²'s computes all experts in one launch. The plan says which runs:
+
+----
+  experts      LoRA on 80 expert stacks (mlp.experts.down_proj, mlp.experts.gate_up_proj), on the tokens routed to each (yours; auto: frozen, ...; meepsquared's routed LoRA; meepsquared's grouped kernel, ...)
+----
+
+`experts=True` takes no LoRA dropout. A model without expert stacks is refused. See xref:mixture-of-experts.adoc[Mixture of experts].
+
+== GRPO
+
+[source,python]
+----
+def short(completions, **kwargs):
+    return [-len(c) / 100 for c in completions]
+
+job = m2.TrainingJob(model="Qwen/Qwen3-4B", data="trl-lib/tldr", task="grpo", rewards=[short], steps=200,
+                     recipe=m2.Recipe(generations=8, max_completion_length=256, temperature=1.0, top_k=40,
+                                      chat_template_kwargs={"enable_thinking": False}),
+                     overrides=m2.Overrides(vllm=True))
+job.train().save("grpo-adapter")
+----
+
+The effective batch of GRPO counts completions: with 8 generations for each prompt, an effective batch of 8 is one prompt per update. GRPO has no token budget; its batches are TRL's, and its learning rate is the stated one, not scaled.
+
+The generation settings are in the recipe: `generations`, `max_completion_length`, `temperature`, `top_p`, `top_k` and `chat_template_kwargs`. Each one you leave out takes TRL's default, and the plan shows it. `max_completion_length` must be shorter than `max_length`, which holds the prompt and the completion.
+
+By default TRL generates with Transformers, with the training model. `Overrides(vllm=True)` generates with vLLM in the training process instead (TRL's colocate mode). That is several times faster. vLLM then takes its share of the GPU's memory (TRL's `vllm_gpu_memory_utilization`, 0.3), and Meep² measures the batch with that share kept free. vLLM holds sequences of up to `max_length` tokens. It needs TRL 1.16 or later and vLLM installed (see xref:grpo.adoc#_installing_vllm[Installing vLLM]); it is refused with `method="fp8"`. See xref:grpo.adoc[GRPO].
+
+== Run tracking
+
+`report_to` sends each step's loss and learning rate to a tracking service, through Transformers' integrations. With `report_to="mlflow"`, MLflow records the run. When an MLflow run is open already, for example from `mlflow.start_run()` in a notebook, the steps go to that run.
+
+[source,python]
+----
+job = m2.TrainingJob(model=..., data=..., report_to="mlflow")
+----
+
+== Stopping and resuming
+
+A training can stop at the end of an optimizer step, save a checkpoint, and continue later from it, exactly as if it had not stopped. This lets a training run in time slots, for example at night.
+
+[source,bash]
+----
+meepsquared train job.yaml --status-file status.json --stop-file STOP            # first session
+meepsquared train job.yaml --status-file status.json --stop-file STOP --resume   # each later session
+----
+
+Stopping:: When the stop file exists at the end of an optimizer step, the training finishes the evaluation that step runs, if any, then saves a checkpoint in the job's output folder and stops; the command exits with code 75. A SIGTERM does the same, so a stopped pod keeps its work if the step in progress ends within its grace period. The stop comes at the next step boundary: the step in progress finishes, so the wait is at most one step (see the plan's `time` line). A request during the last step does not stop the training: it completes. Meep² does not remove the stop file; remove it before you resume, or the training stops again after one step. An evaluation is never cut short: one due at the step runs before the checkpoint is saved.
+
+The checkpoint:: Transformers' checkpoint, in `<output>/checkpoint-<step>`: the adapter's weights, the optimizer's state, the scheduler's state, the random number generators' states and the trainer's state.
+
+Resuming:: `--resume` (`job.train(resume=True)`) continues from the latest checkpoint in the output folder. The optimizer and the scheduler continue where they were: the learning-rate schedule spans the planned steps, so the sessions train one schedule. The data continues at the next micro-batch: Meep² lays out every micro-batch of the training ahead from the trainer's seed, the resumed training starts in the epoch it stopped in, and the trainer skips the micro-batches already trained, on each process its own share. The loss of each step after a resume is the loss of the uninterrupted training. Without a checkpoint in the output folder, `--resume` is refused, naming the folder.
+
+The same training:: A resume plans again, and on a GPU it measures again. Its plan must make the same micro-batches and schedule as the first session's, which Meep² keeps in `<output>/meepsquared-plan.json`: the batch, the micro-batch, the accumulation, the order, the length, LoRA's settings, the optimizer, the learning rate and the schedule. A resume planned otherwise is refused, and the message names each difference; give the job the values it started with, in its recipe or overrides. A new training (without `--resume`) in an output folder that holds checkpoints is refused, as a later resume would continue those. A completed training holds one too: Transformers saves a checkpoint at the last step. Give a new training its own output folder.
+
+The exit code:: `0` the training completed, and the adapter is saved in the output folder; `75` it stopped when asked and saved a checkpoint; any other, it failed.
+
+The status file:: `--status-file` writes the training's state as JSON: at the start, after the plan, after every optimizer step, at each checkpoint and at the end. It is written whole (a temporary file renamed over it), so a reader never sees half of it.
++
+[cols="1,3",options="header"]
+|===
+| Field | Meaning
+
+| `state` | `"planning"`, `"training"`, `"stopping"` (asked to stop; the checkpoint is being saved), `"paused"`, `"completed"` or `"failed"`.
+| `step`, `total_steps` | The optimizer steps done, of the planned steps; both `0` until the plan has counted them.
+| `loss` | The last loss logged; `null` before the first.
+| `seconds_per_step`, `eta_seconds` | This session's mean time per step after its first, and the time left at that pace; `null` until the second step. Neither counts the evaluations' time. The plan holds the timed estimate, which counts them.
+| `eval_loss`, `eval_step` | The latest evaluation's loss and step, a resumed training's earlier sessions' too; `null` before the first or without evaluation.
+| `checkpoint` | The latest checkpoint saved, or found at the end; `null` when there is none.
+| `plan` | `plan.to_dict()`; `null` while planning.
+| `error` | Why the training failed; `null` otherwise.
+| `updated` | When the file was written, in ISO 8601, UTC.
+|===
+
+The same from Python: `job.train(resume=False, stop_file=None, status_file=None, stop_on_sigterm=False)`. A paused training returns a result with `paused` true.
+
+What has been tested: on the CPU, a training stopped within an epoch, at its end and within the next, then resumed, trains the micro-batches of the uninterrupted training in its order, and each step after the resume has its loss and learning rate; under two processes, each process resumes at its next micro-batch. GRPO stops and resumes through Transformers' own checkpoint and data skipping; Meep² lays out no micro-batches for it.
+
+== Several GPUs
+
+Launched with `torchrun`, a job trains with DDP (one copy of the model per GPU). See xref:several-gpus.adoc#_a_training_job_on_several_gpus[Several GPUs] for what it does and what it does not do.
+
+== What the first version does not do
+
+* `plan()` loads the model. A plan from the model's configuration alone, before a GPU is free, is an open question of the design.
+* Auto mode measures a GPU. On a machine without one, set `Overrides(micro_batch=..., checkpointed_layers=...)`, and a token budget as a number of tokens, not `"auto"`.
+* A job does not train with FSDP2 or with a model spread over several GPUs. For these, use the calls in xref:several-gpus.adoc[Several GPUs].

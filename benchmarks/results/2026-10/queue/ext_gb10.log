@@ -1,0 +1,158 @@
+Traceback (most recent call last):
+  File "/home/thinkube/thinkube-ai/notebooks/llebre/benchmarks/results/round2/queue/ext_gb10.py", line 48, in <module>
+    d = call(API, {"node": "tkspark", "notebook_path": "llebre/benchmarks/long-run.ipynb", "gpus": 1, "memory_gb": memory, "reserve_memory": reserve,
+        ^^^^
+NameError: name 'call' is not defined. Did you mean: 'all'?
+17:12:05 started plan llama qlora job 0d2cf2d1-4b91-4554-9ab2-ede9ebc4c5e3 kernel llebre
+17:15:08 plan llama qlora completed 
+    RESULT plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-qlora.json
+    17:14:45 EXIT 0
+17:15:08 started plan gemma qlora job 6aac8e93-8b07-4065-b6e7-d3c8839d18fd kernel llebre
+17:18:08 plan gemma qlora completed 
+    RESULT plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-qlora.json
+    17:17:36 EXIT 0
+17:18:09 started llama qlora auto #1 job 183fb7b3-90ea-4c96-a8a2-798f4f8ef589 kernel llebre
+17:22:11 llama qlora auto #1 completed 
+      0%|          | 0/30 [00:00<?, ?it/s]Backend impl 'liger_kernel.ops.backends._ascend.rope' for op 'rope' could not be imported: ImportError: cannot import name 'tanh' from 'triton.language.math' (/usr/local/lib/python3.12/dist-packages/triton/language/math.py)
+    RESULT {"benchmark": "sft", "arm": "llama-qlora-auto", "attn": "flash_attention_2", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "opt
+    17:21:06 EXIT 0
+17:22:11 started llama qlora trl #1 job 75e8c1a8-c01f-4e88-93eb-29bfa73e3609 kernel llebre
+17:30:17 llama qlora trl #1 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-qlora-trl", "attn": null, "checkpointing": null, "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedu
+    17:29:15 EXIT 0
+17:30:17 started llama qlora unsloth #1 job 6727932f-21ad-45c1-882d-b5c9da9529ff kernel unsloth-conv1d
+17:36:19 llama qlora unsloth #1 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-qlora-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "
+    17:35:10 EXIT 0
+17:36:19 started llama qlora unsloth no ckpt #1 job 1ee19a69-63f9-486c-a055-8e40d840e07a kernel unsloth-conv1d
+17:41:22 llama qlora unsloth no ckpt #1 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-qlora-unsloth-no-checkpointing", "attn": null, "checkpointing": "false", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learnin
+    17:40:41 EXIT 0
+17:41:22 started gemma qlora auto #1 job 716957cd-3372-412c-a0f9-2c5adfe37ccd kernel llebre
+17:45:25 gemma qlora auto #1 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-qlora-auto", "attn": "llebre_varlen", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 42}, "fused": true, "compiled": true, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_
+    17:44:43 EXIT 0
+17:45:25 started gemma qlora trl #1 job 7eae38c5-11b3-4f83-a3bb-591550c6b31f kernel llebre
+17:52:28 gemma qlora trl #1 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-qlora-trl", "attn": null, "checkpointing": null, "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedule": "const
+    17:52:24 EXIT 0
+17:52:28 started gemma qlora unsloth #1 job 00cf3d0d-9c2b-4a38-8cf9-aa770674eb88 kernel unsloth-conv1d
+18:01:33 gemma qlora unsloth #1 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-qlora-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedule": 
+    18:00:39 EXIT 0
+18:01:33 started gemma qlora unsloth no ckpt #1 job 7566e012-16ea-4ae8-a137-650a6d91120e kernel unsloth-conv1d
+18:09:36 gemma qlora unsloth no ckpt #1 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-qlora-unsloth-no-checkpointing", "attn": null, "checkpointing": "false", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.
+    18:08:45 EXIT 0
+18:09:36 started llama qlora auto #2 job 944d9906-b696-4c10-94bc-ee7b3a1f7239 kernel llebre
+18:12:38 llama qlora auto #2 completed 
+      0%|          | 0/30 [00:00<?, ?it/s]Backend impl 'liger_kernel.ops.backends._ascend.rope' for op 'rope' could not be imported: ImportError: cannot import name 'tanh' from 'triton.language.math' (/usr/local/lib/python3.12/dist-packages/triton/language/math.py)
+    RESULT {"benchmark": "sft", "arm": "llama-qlora-auto", "attn": "flash_attention_2", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "opt
+    18:12:33 EXIT 0
+18:12:38 started llama qlora trl #2 job bbddde6a-d100-4bec-9010-3a0341c520dd kernel llebre
+18:19:41 llama qlora trl #2 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-qlora-trl", "attn": null, "checkpointing": null, "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedu
+    18:19:35 EXIT 0
+18:19:41 started llama qlora unsloth #2 job 57dc6626-c9c9-4d4a-90ab-0b7b392eb548 kernel unsloth-conv1d
+18:24:44 llama qlora unsloth #2 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-qlora-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "
+    18:24:33 EXIT 0
+18:24:44 started llama qlora unsloth no ckpt #2 job bb76727f-9daa-407d-bad9-d2d1b189fe28 kernel unsloth-conv1d
+18:29:46 llama qlora unsloth no ckpt #2 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-qlora-unsloth-no-checkpointing", "attn": null, "checkpointing": "false", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learnin
+    18:29:16 EXIT 0
+18:29:47 started gemma qlora auto #2 job 5b6ca300-14a0-4977-9fb2-2145d128b43c kernel llebre
+18:33:49 gemma qlora auto #2 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-qlora-auto", "attn": "llebre_varlen", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 42}, "fused": true, "compiled": true, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_
+    18:33:04 EXIT 0
+18:33:49 started gemma qlora trl #2 job bc4bacf2-8403-495f-ad58-8823cdabccd1 kernel llebre
+18:41:57 gemma qlora trl #2 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-qlora-trl", "attn": null, "checkpointing": null, "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedule": "const
+    18:40:50 EXIT 0
+18:41:58 started gemma qlora unsloth #2 job ceb9ad49-1b9d-4103-9ffd-02ba82ace8dd kernel unsloth-conv1d
+18:51:03 gemma qlora unsloth #2 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-qlora-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedule": 
+    18:50:07 EXIT 0
+18:51:03 started gemma qlora unsloth no ckpt #2 job 7a63d0bb-5de2-4563-b5d3-3dcadf445dbf kernel unsloth-conv1d
+18:59:05 gemma qlora unsloth no ckpt #2 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-qlora-unsloth-no-checkpointing", "attn": null, "checkpointing": "false", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.
+    18:58:20 EXIT 0
+18:59:06 started llama qlora auto #3 job ddf52382-4790-466d-8189-25f570c9ee96 kernel llebre
+19:03:08 llama qlora auto #3 completed 
+      0%|          | 0/30 [00:00<?, ?it/s]Backend impl 'liger_kernel.ops.backends._ascend.rope' for op 'rope' could not be imported: ImportError: cannot import name 'tanh' from 'triton.language.math' (/usr/local/lib/python3.12/dist-packages/triton/language/math.py)
+    RESULT {"benchmark": "sft", "arm": "llama-qlora-auto", "attn": "flash_attention_2", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "opt
+    19:02:06 EXIT 0
+19:03:09 started llama qlora trl #3 job 785848a0-db73-4686-aa1b-b316abc9b993 kernel llebre
+19:12:14 llama qlora trl #3 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-qlora-trl", "attn": null, "checkpointing": null, "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedu
+    19:11:52 EXIT 0
+19:12:14 started llama qlora unsloth #3 job e796cdac-5f57-4061-8769-3ef7dfd1aeb8 kernel unsloth-conv1d
+19:17:17 llama qlora unsloth #3 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-qlora-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "
+    19:17:00 EXIT 0
+19:17:17 started llama qlora unsloth no ckpt #3 job 5eda7070-eaac-4647-9ed7-b4c92e38061e kernel unsloth-conv1d
+19:22:19 llama qlora unsloth no ckpt #3 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-qlora-unsloth-no-checkpointing", "attn": null, "checkpointing": "false", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learnin
+    19:21:40 EXIT 0
+19:22:20 started gemma qlora auto #3 job 89e3aee5-396d-4700-b193-c842a1e42730 kernel llebre
+19:26:22 gemma qlora auto #3 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-qlora-auto", "attn": "llebre_varlen", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 42}, "fused": true, "compiled": true, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_
+    19:25:38 EXIT 0
+19:26:22 started gemma qlora trl #3 job e438ef40-b047-4e8a-9df9-012f45d2190f kernel llebre
+19:34:27 gemma qlora trl #3 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-qlora-trl", "attn": null, "checkpointing": null, "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedule": "const
+    19:33:24 EXIT 0
+19:34:28 started gemma qlora unsloth #3 job 4564d314-e545-48ba-beb7-4a91d391b88d kernel unsloth-conv1d
+19:44:31 gemma qlora unsloth #3 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-qlora-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedule": 
+    19:44:16 EXIT 0
+19:44:31 started gemma qlora unsloth no ckpt #3 job fc581660-f2f0-4f83-99fd-a7a5cfc66cf4 kernel unsloth-conv1d
+19:52:37 gemma qlora unsloth no ckpt #3 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-qlora-unsloth-no-checkpointing", "attn": null, "checkpointing": "false", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "qlora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-qlora.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.
+    19:51:50 EXIT 0
+19:52:38 started moe-llebre #1 job 26da9762-0243-4339-a2b0-2a33dadf4d8e kernel llebre
+20:05:43 moe-llebre #1 error cell 2 raised SystemExit: 1
+        print("RESULT " + json.dumps({**result, "memory": line["memory"]}), flush=True)
+        raise TypeError(f'Object of type {o.__class__.__name__} '
+    TypeError: Object of type Recompute is not JSON serializable
+    20:04:32 EXIT 1
+        print("RESULT " + json.dumps({**result, "memory": line["memory"]}), flush=True)
+        raise TypeError(f'Object of type {o.__class__.__name__} '
+    TypeError: Object of type Recompute is not JSON serializable
+failed: moe-llebre #1 - the chain goes on
+20:05:47 started moe-peft-experts #1 job 52643a1a-4410-4aa5-8808-f32a35dc1d19 kernel llebre
+20:20:57 moe-peft-experts #1 error cell 2 raised SystemExit: 1
+        print("RESULT " + json.dumps({**result, "memory": line["memory"]}), flush=True)
+        raise TypeError(f'Object of type {o.__class__.__name__} '
+    TypeError: Object of type Recompute is not JSON serializable
+    20:20:27 EXIT 1
+        print("RESULT " + json.dumps({**result, "memory": line["memory"]}), flush=True)
+        raise TypeError(f'Object of type {o.__class__.__name__} '
+    TypeError: Object of type Recompute is not JSON serializable
+failed: moe-peft-experts #1 - the chain goes on
+20:20:57 started moe-llebre #2 job f795d08a-441e-435c-aa32-e986a2507981 kernel llebre
+20:24:21 started moe-llebre #1 job cfd00647-b542-47e5-bda0-fe89315222d2 kernel llebre
+20:36:23 moe-llebre #1 completed 
+    RESULT {"benchmark": "moe", "arm": "moe-llebre", "model": "Qwen/Qwen3.6-35B-A3B", "source": "thinkube", "fp8": false, "checkpointing": "auto", "checkpointed_layers": {"whole": 38, "selective": 0, "none": 2}, "trainable_m": 941.9, "batch": 32, "tokens_per_step": 9440, "s_per_step": 12.04, "s_by_step": [63.834, 11.7, 11.436, 10.223, 11.821, 11.299, 26.33, 11.907, 11.24, 11.199, 10.842, 10.125, 12.39, 11.488, 24.453, 10.597, 9.015, 10.676, 13.218, 11.871, 11.526, 9.919, 13.174, 12.212, 12.401, 11.685, 11.078, 11.56, 12.195, 10.279], "steps_per_hour": 299, "tokens_per_s": 779, "peak_gib": [78.8], 
+    20:36:02 EXIT 0
+20:36:23 started moe-peft-experts #1 job f1cf9775-9280-4c51-9164-cefb798382f0 kernel llebre
+20:50:26 moe-peft-experts #1 completed 
+    RESULT {"benchmark": "moe", "arm": "moe-peft-experts", "model": "Qwen/Qwen3.6-35B-A3B", "source": "thinkube", "fp8": false, "checkpointing": "auto", "checkpointed_layers": {"whole": 38, "selective": 0, "none": 2}, "trainable_m": 941.9, "batch": 32, "tokens_per_step": 9440, "s_per_step": 16.49, "s_by_step": [68.052, 16.768, 15.581, 14.999, 15.922, 15.734, 30.492, 16.24, 15.414, 15.388, 15.354, 14.463, 17.296, 15.644, 29.2, 15.098, 13.511, 15.412, 17.717, 15.934, 16.047, 14.32, 17.508, 16.351, 16.94, 15.898, 15.712, 15.693, 17.015, 14.637], "steps_per_hour": 218, "tokens_per_s": 569, "peak_gib":
+    20:50:18 EXIT 0
+20:50:26 started moe-llebre #2 job b5c3c8eb-3d59-49f6-8ac9-80de30f6d1c9 kernel llebre
+21:02:33 moe-llebre #2 completed 
+    RESULT {"benchmark": "moe", "arm": "moe-llebre", "model": "Qwen/Qwen3.6-35B-A3B", "source": "thinkube", "fp8": false, "checkpointing": "auto", "checkpointed_layers": {"whole": 38, "selective": 0, "none": 2}, "trainable_m": 941.9, "batch": 32, "tokens_per_step": 9440, "s_per_step": 12.13, "s_by_step": [63.362, 11.641, 11.402, 10.185, 11.804, 11.307, 26.438, 11.855, 11.273, 11.183, 10.829, 10.075, 12.374, 11.578, 24.38, 10.552, 8.992, 10.672, 15.141, 12.064, 11.519, 9.935, 13.109, 12.259, 12.393, 11.707, 11.078, 11.536, 12.185, 10.264], "steps_per_hour": 297, "tokens_per_s": 773, "peak_gib": [78
+    21:02:24 EXIT 0
+21:02:33 started moe-peft-experts #2 job 66f3158e-ad94-4fb7-b354-bf1017be2a98 kernel llebre
+21:16:41 moe-peft-experts #2 completed 
+    RESULT {"benchmark": "moe", "arm": "moe-peft-experts", "model": "Qwen/Qwen3.6-35B-A3B", "source": "thinkube", "fp8": false, "checkpointing": "auto", "checkpointed_layers": {"whole": 38, "selective": 0, "none": 2}, "trainable_m": 941.9, "batch": 32, "tokens_per_step": 9440, "s_per_step": 16.32, "s_by_step": [67.481, 15.895, 15.516, 14.523, 15.848, 15.44, 30.658, 16.007, 15.403, 15.601, 15.076, 14.414, 16.589, 15.634, 29.054, 14.82, 13.515, 15.163, 17.295, 15.877, 15.793, 14.267, 17.083, 16.41, 16.531, 15.834, 15.659, 15.958, 16.734, 14.767], "steps_per_hour": 221, "tokens_per_s": 575, "peak_gib
+    21:16:22 EXIT 0
+21:16:41 started moe-llebre #3 job c006f58d-5348-44cb-9323-e11a82cf6cab kernel llebre
+21:28:48 moe-llebre #3 completed 
+    RESULT {"benchmark": "moe", "arm": "moe-llebre", "model": "Qwen/Qwen3.6-35B-A3B", "source": "thinkube", "fp8": false, "checkpointing": "auto", "checkpointed_layers": {"whole": 38, "selective": 0, "none": 2}, "trainable_m": 941.9, "batch": 32, "tokens_per_step": 9440, "s_per_step": 12.04, "s_by_step": [64.038, 11.617, 11.417, 10.223, 11.751, 11.221, 26.264, 11.886, 11.229, 11.197, 10.879, 10.082, 12.423, 11.497, 24.631, 10.524, 8.946, 10.669, 13.15, 11.828, 11.489, 9.931, 13.062, 12.273, 12.414, 11.723, 11.128, 11.614, 12.214, 10.257], "steps_per_hour": 299, "tokens_per_s": 779, "peak_gib": [78
+    21:28:30 EXIT 0
+21:28:48 started moe-peft-experts #3 job 280fd800-f9c6-4fe1-996d-112b87dac9a9 kernel llebre
+21:42:57 moe-peft-experts #3 completed 
+    RESULT {"benchmark": "moe", "arm": "moe-peft-experts", "model": "Qwen/Qwen3.6-35B-A3B", "source": "thinkube", "fp8": false, "checkpointing": "auto", "checkpointed_layers": {"whole": 38, "selective": 0, "none": 2}, "trainable_m": 941.9, "batch": 32, "tokens_per_step": 9440, "s_per_step": 16.49, "s_by_step": [67.376, 16.732, 15.512, 14.914, 16.293, 15.388, 30.554, 15.978, 15.427, 15.805, 15.1, 14.925, 16.417, 16.107, 29.118, 15.106, 13.5, 15.437, 17.996, 15.909, 16.056, 14.297, 17.443, 16.338, 16.935, 15.782, 15.733, 15.624, 17.308, 14.607], "steps_per_hour": 218, "tokens_per_s": 569, "peak_gib"
+    21:42:40 EXIT 0
+chain done; failed: none

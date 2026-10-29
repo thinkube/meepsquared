@@ -1,0 +1,84 @@
+# NeMo AutoModel at meepsquared's SFT benchmark settings, on one DGX Spark.
+# Derived from the Llama 3.1 8B LoRA recipe of NVIDIA's DGX Spark fine-tuning
+# playbook (https://build.nvidia.com/spark/nemo-fine-tune), run in the container
+# nvcr.io/nvidia/nemo-automodel:26.08, with the settings of meepsquared's benchmarks: the same
+# data (HuggingFaceH4/no_robots, the first conversations in order), 8
+# conversations of up to 1,024 tokens per step, LoRA rank 16, alpha 16, on the
+# seven projections, the loss on the assistant turns, learning rate 1e-4.
+# AutoModel's speed options on the same batches: torch.compile and the fused linear cross-entropy.
+
+recipe: TrainFinetuneRecipeForNextTokenPrediction
+
+step_scheduler:
+  global_batch_size: 8
+  local_batch_size: 8
+  ckpt_every_steps: 100000
+  val_every_steps: 100000
+  num_epochs: 1
+  max_steps: 30
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 1
+
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 0
+  ranked: true
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained
+  pretrained_model_name_or_path: meta-llama/Llama-3.1-8B-Instruct
+  force_hf: true
+  attn_implementation: flash_attention_2
+  disable_mmap: true
+  # FusedLinearCrossEntropy reads the hidden states instead of the full logits
+  output_hidden_states: true
+
+peft:
+  _target_: nemo_automodel.components._peft.lora.PeftConfig
+  target_modules: '*_proj'
+  dim: 16
+  alpha: 16
+  use_triton: True
+
+distributed:
+  strategy: fsdp2
+  dp_size: none
+  tp_size: 1
+  cp_size: 1
+  activation_checkpointing: false
+  sequence_parallel: false
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.linear_ce.FusedLinearCrossEntropy
+
+compile:
+  enabled: true
+  mode: "default"
+  fullgraph: false
+  dynamic: true
+  backend: null
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.chat_dataset.ChatDataset
+  path_or_dataset_id: HuggingFaceH4/no_robots
+  split: train[:240]
+  seq_length: 1024
+  truncation: true
+  start_of_turn_token: "<|start_header_id|>"
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+  shuffle: false
+
+optimizer:
+  _target_: torch.optim.AdamW
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  lr: 1.0e-4
+  weight_decay: 0
+
+lr_scheduler:
+  lr_decay_style: constant

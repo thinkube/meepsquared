@@ -1,0 +1,10 @@
+__pycache__/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+benchmarks/.triton-cache/
+benchmarks/results/warm-up.jsonl
+benchmarks/results/profile-runs.jsonl
+benchmarks/profiles/
+notebooks/out/

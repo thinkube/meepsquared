@@ -1,0 +1,45 @@
+= Compatibility
+:page-type: reference
+
+_The versions, hardware and models Meep² is tested with._
+
+.TL;DR
+Python 3.12, PyTorch 2.11 with CUDA from your environment, and the exact versions below, which pip installs with Meep². An NVIDIA GPU of the Ampere generation or later; tested on NVIDIA GB10 and RTX 3090.
+
+== Packages
+
+[cols="1,1,3",options="header"]
+|===
+| Package | Versions | Notes
+
+| PyTorch | 2.11, from the environment | Not installed by Meep², so a PyTorch built for your GPU is never replaced: NVIDIA's container 26.03, or `pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu130`.
+| Transformers | 5.20.2 |
+| TRL | 1.16.0 |
+| PEFT | 0.21.2 |
+| datasets | 4.8.4 |
+| accelerate | 1.15.0 |
+| Liger Kernel | 0.8.5 | Meep² sets the chunk size of Liger's fused loss through its ops module, and runs Liger's rotary embedding on its Triton kernel: the CuTe DSL kernel Liger picks where NVIDIA's CUTLASS DSL is installed failed on a GB10 at step 136 of a Llama 3.1 8B training. `LIGER_KERNEL_IMPL_ROPE` set before loading overrides that.
+| bitsandbytes | 0.50.2 | 4-bit models, 8-bit optimizers, fused LoRA.
+| flash-linear-attention, fla-core | 0.6.0 | Padding-free batches on Qwen3.5, Qwen3.6 and Qwen3-Next.
+| FlashAttention | 2.7, optional | Not installed by pip; NVIDIA's container has it. Without it, padding-free batches run on PyTorch's memory-efficient kernel (`meepsquared_varlen`).
+| vLLM | 0.22 or later (TRL's floor) | Optional; GRPO generation in colocate mode. vLLM and PyTorch must be the same pair: on NVIDIA's PyTorch container, the wheel of `tk-vllm-wheels` built for it (xref:grpo.adoc#_installing_vllm[Installing vLLM]).
+|===
+
+== Hardware
+
+[cols="1,3",options="header"]
+|===
+| GPU | Tested
+
+| NVIDIA GB10 (DGX Spark), 128 GB shared memory
+| SFT with LoRA and QLoRA, frozen weights in FP8, mixture of experts, GRPO generating with Transformers and with vLLM, shard-by-shard loading.
+
+| 2 × NVIDIA RTX 3090, 24 GB each, PCIe without NVLink
+| One GPU, DDP, FSDP2, QLoRA with DDP and FSDP2, a model spread over both.
+|===
+
+== Models
+
+The models of the xref:benchmarks.adoc[benchmarks] are tested end to end. Other decoder-only models of Transformers load and train; Liger's kernels need a model type Liger patches, and `liger=False` trains any other.
+
+Vision layers are not trained.

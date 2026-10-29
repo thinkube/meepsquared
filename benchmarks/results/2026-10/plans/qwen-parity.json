@@ -1,0 +1,416 @@
+{
+ "model": "/home/thinkube/thinkube/mlflow/artifacts/1/3fff0933294740a6ae61724295182e1a/artifacts/model",
+ "task": "sft",
+ "method": "lora",
+ "device": "NVIDIA GB10",
+ "free_bytes": 91535023104,
+ "decisions": [
+  {
+   "name": "loading",
+   "label": "loading",
+   "value": "shard_by_shard",
+   "text": "shard by shard to GPU 0",
+   "reason": "the GPU shares the system's memory",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "weights",
+   "label": "weights",
+   "value": "lora",
+   "text": "bfloat16",
+   "reason": "method lora",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "attention",
+   "label": "attention",
+   "value": "flash_attention_2",
+   "text": "flash_attention_2",
+   "reason": "FlashAttention 2 with packed sequences",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "padding_free",
+   "label": "batches",
+   "value": true,
+   "text": "packed, no padding",
+   "reason": "the attention (flash_attention_2) keeps the examples apart",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "liger",
+   "label": "Liger",
+   "value": true,
+   "text": "kernels and fused loss, without its SwiGLU: the fused LoRA MLP runs instead",
+   "reason": "from_pretrained's default",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "fused_lora",
+   "label": "fused LoRA",
+   "value": true,
+   "text": "on",
+   "reason": "the model's MLP has a fused kernel",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "compile_layers",
+   "label": "compile",
+   "value": false,
+   "text": "layers not compiled",
+   "reason": "FlashAttention runs outside them",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "checkpointed_layers",
+   "label": "checkpoint",
+   "value": 0,
+   "text": "0 of 32 layers",
+   "reason": "one layer for the largest of the 200 micro-batches this job trains, 4,068 tokens (8 examples, end to end); the data's 8 longest would be 8,192: 0.56 GiB keeping everything, 0.03 recomputed whole; its forward and backward 108 / 150 ms in that order; free: 85 of 122 GiB; selective recomputation not offered: the linear-attention layers run flash-linear-attention's delta-rule kernel, which the policy cannot see; selective recomputation is not verified on them",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "selective_layers",
+   "label": "selective",
+   "value": 0,
+   "text": "0 of 32 layers",
+   "reason": "the linear-attention layers run flash-linear-attention's delta-rule kernel, which the policy cannot see; selective recomputation is not verified on them",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "allocator",
+   "label": "allocator",
+   "value": "expandable segments",
+   "text": "expandable segments",
+   "reason": "",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "effective_batch",
+   "label": "batch",
+   "value": 8,
+   "text": "8 examples per update",
+   "reason": "9.0B parameters, up to 13B: the smallest that keeps the GPU busy: LoRA learns less from large batches (Thinking Machines, 2025); QLoRA used 16 up to 13B and 32 to 64 above (Dettmers et al., 2023, table 9); batched by examples; Recipe(tokens_per_update='auto') batches by tokens instead",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "micro_batch",
+   "label": "micro-batch",
+   "value": 8,
+   "text": "8",
+   "reason": "the largest share of 8 examples that fits with every layer checkpointed: 1.65 GiB for the largest of the 200 micro-batches this job trains, 4,068 tokens (8 examples, end to end); the data's 8 longest would be 8,192",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "accumulation",
+   "label": "accumulation",
+   "value": 1,
+   "text": "1 micro-batches per update",
+   "reason": "effective batch / (micro-batch x processes)",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "order",
+   "label": "order",
+   "value": 42,
+   "text": "shuffled with seed 42, the micro-batches of 1 epoch laid out ahead",
+   "reason": "the trainer's seed; the training runs the micro-batches measured",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "rank",
+   "label": "LoRA rank",
+   "value": 16,
+   "text": "16",
+   "reason": "llebre's default",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "alpha",
+   "label": "LoRA alpha",
+   "value": 16,
+   "text": "16",
+   "reason": "alpha = rank, a scaling of 1",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "dropout",
+   "label": "LoRA dropout",
+   "value": 0.0,
+   "text": "0.0",
+   "reason": "get_peft_model's default",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "targets",
+   "label": "targets",
+   "value": [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+   ],
+   "text": "q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj",
+   "reason": "the attention and MLP projections",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "experts",
+   "label": "experts",
+   "value": false,
+   "text": "none, not a mixture of experts",
+   "reason": "",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "optimizer",
+   "label": "optimizer",
+   "value": "adamw_8bit",
+   "text": "adamw_8bit",
+   "reason": "8-bit AdamW: a quarter of AdamW's state memory",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "learning_rate",
+   "label": "learning rate",
+   "value": 0.0001,
+   "text": "0.0001",
+   "reason": "9.0B parameters: at alpha = rank, published rates for 7B to 13B models are near 1e-4 (QLoRA's 2e-4 at scaling 0.25; Thinking Machines, LoRA Without Regret, 2025)",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "schedule",
+   "label": "schedule",
+   "value": "constant",
+   "text": "constant after the warm-up",
+   "reason": "over the 200 planned steps; to be set by the measurement round",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "warmup_steps",
+   "label": "warm-up",
+   "value": 10,
+   "text": "10 steps",
+   "reason": "100 steps or 5% of the 200 planned steps, whichever is fewer",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "max_grad_norm",
+   "label": "clipping",
+   "value": 1.0,
+   "text": "gradient norm at most 1",
+   "reason": "the default of TRL's config",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "weight_decay",
+   "label": "weight decay",
+   "value": 0.0,
+   "text": "0",
+   "reason": "the default of TRL's config",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "length",
+   "label": "length",
+   "value": 200,
+   "text": "200 steps",
+   "reason": "as given",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "duration",
+   "label": "time",
+   "value": 3.882853942923248,
+   "text": "about 3.88 s per step, 13 min for 200 steps",
+   "reason": "the median of 3 optimizer steps timed after 1 to warm up, each 1 forward and backward passes of the largest micro-batch, 4,068 tokens (8 examples, end to end); the steps' micro-batches are at most as large",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "memory",
+   "label": "memory",
+   "value": {
+    "peak_gpu_bytes": 56595841024,
+    "peak_host_bytes": 9168740352,
+    "memory_request_bytes": 73014444032
+   },
+   "text": "peak 52.71 GiB on the GPU, 8.54 GiB on the host; a job should ask for 68 GiB (the host's peak plus the GPU's: the GPU takes its memory from the system's, and the process's resident memory does not count it, 10% over it, rounded up to a whole GiB)",
+   "reason": "the GPU: the most PyTorch reserved over the timed steps; the host: the process's peak resident memory since it started, loading included; the host's figure does not count the GPU's allocations",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "evaluation",
+   "label": "evaluation",
+   "value": null,
+   "text": "none",
+   "reason": "no eval_data or eval_share given",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "data_checks",
+   "label": "data checks",
+   "value": {
+    "rows": 1600,
+    "longer": {
+     "count": 22,
+     "rows": [
+      4,
+      183,
+      228,
+      466,
+      490
+     ]
+    },
+    "answers_cut": {
+     "count": 22,
+     "rows": [
+      4,
+      183,
+      228,
+      466,
+      490
+     ]
+    },
+    "no_answer": {
+     "count": 0,
+     "rows": []
+    },
+    "eval_no_answer": null,
+    "overlap": null,
+    "synthetic_share": null
+   },
+   "text": "1,600 rows render; 22 longer than 1024 tokens, 22 of them with answer tokens cut; 0 without answer tokens, left out",
+   "reason": "the cut keeps each example's start; Recipe(max_cut_share=...) refuses more than a share; a row of no answer token trains nothing; answers cut: rows 4, 183, 228, 466, 490 and 17 more",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "source_weights",
+   "label": "weights",
+   "value": null,
+   "text": "none",
+   "reason": "every row's loss weighs the same",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "max_length",
+   "label": "tokens",
+   "value": 1024,
+   "text": "up to 1024 per example",
+   "reason": "TRL's SFTConfig default",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "answers_only",
+   "label": "loss on",
+   "value": true,
+   "text": "the answers only, by TRL's assistant-only loss",
+   "reason": "TRL's training version of the chat template",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "data",
+   "label": "data",
+   "value": "a datasets.Dataset",
+   "text": "a datasets.Dataset: 1,600 rows of conversations (messages)",
+   "reason": "",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "report_to",
+   "label": "tracking",
+   "value": [],
+   "text": "none",
+   "reason": "Transformers' default",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  },
+  {
+   "name": "output",
+   "label": "output",
+   "value": "model-SFT",
+   "text": "model-SFT",
+   "reason": "named after the model and the task",
+   "by": "auto",
+   "auto_value": null,
+   "auto_text": ""
+  }
+ ],
+ "seconds_per_step": 3.882853942923248,
+ "estimated_seconds": 776.5707885846496,
+ "peak_gpu_bytes": 56595841024,
+ "peak_host_bytes": 9168740352,
+ "memory_request_bytes": 73014444032,
+ "benchmark_model": "Qwen/Qwen3.5-9B"
+}

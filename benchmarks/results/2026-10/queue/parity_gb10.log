@@ -1,0 +1,105 @@
+11:58:08 [0] started plan llama job 2ed085ef-2ead-4df4-83d8-b7778dcfc066 kernel llebre
+12:01:08 [0] plan llama completed 
+    RESULT plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-parity.json
+    12:00:36 EXIT 0
+12:01:08 [1] started plan gemma job dfbb43d5-4dd1-4570-a5c3-a8aa37103c0c kernel llebre
+12:05:09 [1] plan gemma completed 
+    RESULT plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-parity.json
+    12:04:15 EXIT 0
+12:05:09 [2] started plan qwen job 9fd14a86-a1aa-4ccd-a051-86cf2208f470 kernel llebre
+12:09:09 [2] plan qwen completed 
+    RESULT plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-parity.json
+    12:08:32 EXIT 0
+12:09:09 [3] started llama trl seed 42 job b3670c18-9a5f-4616-bff2-b7a1b08b1f62 kernel llebre
+12:47:11 [3] llama trl seed 42 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-trl", "attn": null, "checkpointing": null, "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedule": "
+    12:46:06 EXIT 0
+12:47:11 [4] started llama unsloth seed 42 job bca5c33e-3c39-4fb2-9d62-d292bad4a490 kernel unsloth-conv1d
+13:00:15 [4] llama unsloth seed 42 error cell 2 raised SystemExit: 1
+    KeyError: 'input_ids'
+    12:59:44 EXIT 1
+    KeyError: 'input_ids'
+failed: llama unsloth seed 42 - the chain goes on
+13:00:15 [5] started llama auto seed 42 job 16b06f8e-be6a-4ea0-ad31-a82a9cb69765 kernel llebre
+13:10:16 [5] llama auto seed 42 completed 
+      0%|          | 0/200 [00:00<?, ?it/s]Backend impl 'liger_kernel.ops.backends._ascend.rope' for op 'rope' could not be imported: ImportError: cannot import name 'tanh' from 'triton.language.math' (/usr/local/lib/python3.12/dist-packages/triton/language/math.py)
+    RESULT {"benchmark": "sft", "arm": "llama-auto", "attn": "flash_attention_2", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer
+    13:09:43 EXIT 0
+13:10:16 [6] started gemma unsloth seed 42 job ea27f3b1-e1e8-4cfd-b3b2-7eb3099c8115 kernel unsloth-conv1d
+13:33:17 [6] gemma unsloth seed 42 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedule": "const
+    13:32:39 EXIT 0
+13:33:17 [7] started gemma auto seed 42 job 3183ad61-e187-4a54-9d3e-71f54344d879 kernel llebre
+13:43:17 [7] gemma auto seed 42 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-auto", "attn": "llebre_varlen", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 42}, "fused": true, "compiled": true, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit",
+    13:43:05 EXIT 0
+13:43:18 [8] started qwen unsloth seed 42 job b37a1555-8c31-4b7d-a8ed-f4fb2231afc8 kernel unsloth-conv1d
+14:08:46 queue stopped by hand; the Qwen Unsloth job (b37a1555) runs on; reordered: Gemma evaluation check first, llebre arms last
+14:25:46 [8] qwen unsloth seed 42 completed 
+14:25:46 [17] started gemma eval-only trl job 170d7fe8-79ba-4069-8b49-257015347d3b kernel llebre
+14:31:47 [17] gemma eval-only trl completed 
+    RESULT eval-only {"arm": "gemma-trl-untrained", "model": "google/gemma-4-E4B-it", "eval_loss": 3.905062}
+    14:30:44 EXIT 0
+14:31:47 [18] started gemma eval-only unsloth job fceb4bb6-2f00-4ae2-96e6-f1e072fe2df3 kernel unsloth-conv1d
+14:36:47 [18] gemma eval-only unsloth completed 
+    RESULT eval-only {"arm": "gemma-unsloth-untrained", "model": "google/gemma-4-E4B-it", "eval_loss": 3.892549}
+    14:36:42 EXIT 0
+14:36:47 [19] started gemma eval-only llebre job b777449f-06b1-4112-8ea3-db2f02288c1b kernel llebre
+14:39:48 [19] gemma eval-only llebre completed 
+    RESULT eval-only {"arm": "gemma-llebre-untrained", "model": "google/gemma-4-E4B-it", "eval_loss": 3.90323}
+    14:39:33 EXIT 0
+14:39:48 [10] started llama trl seed 43 job f2b51e6a-f577-482b-bdbf-78153e9a026a kernel llebre
+15:17:07 [10] llama trl seed 43 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-trl", "attn": null, "checkpointing": null, "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedule": "
+    15:16:04 EXIT 0
+15:17:07 [11] started llama unsloth seed 43 job b6c91f93-1cb9-454b-b8a6-e5abf0793928 kernel unsloth-conv1d
+15:30:14 [11] llama unsloth seed 43 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedu
+    15:29:59 EXIT 0
+15:30:14 [13] started gemma unsloth seed 43 job af5db718-8318-47e1-84be-412d1f73a4b5 kernel unsloth-conv1d
+15:53:27 [13] gemma unsloth seed 43 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedule": "const
+    15:52:27 EXIT 0
+15:53:27 [15] started qwen unsloth seed 43 job e5ccc824-e417-4946-bee6-367bea5d75a8 kernel unsloth-conv1d
+16:35:51 [15] qwen unsloth seed 43 completed 
+    RESULT {"benchmark": "sft", "arm": "qwen-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "Qwen/Qwen3.5-9B", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedule": "constant", "w
+    16:34:57 EXIT 0
+16:35:51 [4] started llama unsloth seed 42 job b6503073-716e-449a-8110-16393347d30f kernel unsloth-conv1d
+16:49:58 [4] llama unsloth seed 42 completed 
+    RESULT {"benchmark": "sft", "arm": "llama-unsloth", "attn": null, "checkpointing": "auto", "checkpointed_layers": null, "fused": null, "compiled": null, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedu
+    16:48:47 EXIT 0
+16:49:58 [9] started qwen auto seed 42 job 1fdb2570-3016-47bf-bfe6-46c4adeeb272 kernel llebre
+17:03:05 [9] qwen auto seed 42 completed 
+    RESULT {"benchmark": "sft", "arm": "qwen-auto", "attn": "flash_attention_2", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "Qwen/Qwen3.5-9B", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "l
+    17:02:08 EXIT 0
+17:03:06 [12] started llama auto seed 43 job 9ab14c90-f982-491a-8177-2237bc8fe35f kernel llebre
+17:13:11 [12] llama auto seed 43 completed 
+      0%|          | 0/200 [00:00<?, ?it/s]Backend impl 'liger_kernel.ops.backends._ascend.rope' for op 'rope' could not be imported: ImportError: cannot import name 'tanh' from 'triton.language.math' (/usr/local/lib/python3.12/dist-packages/triton/language/math.py)
+    RESULT {"benchmark": "sft", "arm": "llama-auto", "attn": "flash_attention_2", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "meta-llama/Llama-3.1-8B-Instruct", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/llama-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer
+    17:12:37 EXIT 0
+17:13:11 [14] started gemma auto seed 43 job 5f79bf16-2fb4-4d7d-86ab-2491827abfbd kernel llebre
+17:22:16 [14] gemma auto seed 43 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-auto", "attn": "llebre_varlen", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 42}, "fused": true, "compiled": true, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit",
+    17:21:55 EXIT 0
+17:22:16 [16] started qwen auto seed 43 job d6bbaf6b-d358-4980-ba5f-b021a7536477 kernel llebre
+17:35:22 [16] qwen auto seed 43 completed 
+    RESULT {"benchmark": "sft", "arm": "qwen-auto", "attn": "flash_attention_2", "checkpointing": "plan", "checkpointed_layers": {"whole": 0, "selective": 0, "none": 32}, "fused": true, "compiled": false, "model": "Qwen/Qwen3.5-9B", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "l
+    17:34:35 EXIT 0
+chain done; failed: none
+20:48:49 the chained Gemma TRL arm and Qwen check never started (the chain waited on a zombie process); started by hand
+20:48:49 [21] started qwen eval-only trl job 4edbb525-041e-4a3c-873f-eeb0ea033f99 kernel llebre
+20:55:22 [21] qwen eval-only trl completed 
+20:55:22 [22] started qwen eval-only unsloth job 0e551734-eaab-4e2f-befe-caf953df417d kernel unsloth-conv1d
+    RESULT eval-only {"arm": "qwen-trl-untrained", "model": "Qwen/Qwen3.5-9B", "eval_loss": 2.229429}  (job 4edbb525, copied from its output: the queue only waited for it)
+21:02:23 [22] qwen eval-only unsloth completed 
+    RESULT eval-only {"arm": "qwen-unsloth-untrained", "model": "Qwen/Qwen3.5-9B", "eval_loss": 2.220992}
+    21:01:20 EXIT 0
+21:02:23 [23] started qwen eval-only llebre job 0a965d4b-ee65-46fb-9844-61f1338c5184 kernel llebre
+21:06:23 [23] qwen eval-only llebre completed 
+    RESULT eval-only {"arm": "qwen-llebre-untrained", "model": "Qwen/Qwen3.5-9B", "eval_loss": 2.229269}
+    21:05:42 EXIT 0
+21:06:23 [17] started gemma trl seed 42 job 926530fe-6a87-4f23-81ec-557a3ba84007 kernel llebre
+21:42:38 [17] gemma trl seed 42 completed 
+    RESULT {"benchmark": "sft", "arm": "gemma-trl", "attn": null, "checkpointing": null, "checkpointed_layers": null, "fused": null, "compiled": null, "model": "google/gemma-4-E4B-it", "source": "thinkube", "method": "lora", "batch": 8, "tokens_per_update": null, "micro_batch": 8, "plan": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/gemma-parity.json", "training": {"rank": 16, "alpha": 16, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"], "optimizer": "adamw_8bit", "learning_rate": 0.0001, "schedule": "constant", 
+    21:41:51 EXIT 0
+chain done; failed: none

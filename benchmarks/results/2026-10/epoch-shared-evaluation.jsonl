@@ -1,0 +1,6 @@
+{"arm": "gemma-meep-eval-trl", "model": "google/gemma-4-E4B-it", "adapter": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/gemma-meep", "eval_loss": 1.929496}
+{"arm": "gemma-unsloth-eval-trl", "model": "google/gemma-4-E4B-it", "adapter": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/gemma-unsloth", "eval_loss": 1.932564}
+{"arm": "gemma-trl-eval-trl", "model": "google/gemma-4-E4B-it", "adapter": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/gemma-trl", "eval_loss": 1.930289}
+{"arm": "qwen-meep-eval-trl", "model": "Qwen/Qwen3.5-9B", "adapter": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-meep", "eval_loss": 1.781286}
+{"arm": "qwen-trl-eval-trl", "model": "Qwen/Qwen3.5-9B", "adapter": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-trl", "eval_loss": 1.781475}
+{"arm": "qwen-unsloth-eval-trl", "model": "Qwen/Qwen3.5-9B", "adapter": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-unsloth-renamed", "eval_loss": 1.781137}

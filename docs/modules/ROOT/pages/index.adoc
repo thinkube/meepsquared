@@ -1,0 +1,57 @@
+= Meep²
+:page-type: concept
+
+_Fast LoRA and QLoRA fine-tuning on Hugging Face Transformers, PEFT and TRL, built only from permissively licensed parts._
+
+== What Meep² is
+
+Meep² is an easy-to-use LoRA and QLoRA fine-tuning engine for Hugging Face models: you name the model, the data and the method, and it decides the rest. It measures your model, your data and your GPU, and prints a plan with the reason for each choice. It trains with TRL's own trainers and reaches the same loss as TRL, 2.2 to 2.9 times faster than Unsloth over a full epoch on this year's architectures, with the parameters it sets automatically (xref:benchmarks.adoc[Benchmarks]). It runs on one GPU or several in one machine (xref:several-gpus.adoc[Several GPUs]), including GPUs that share memory with the CPU, such as the DGX Spark. Meep² is the fine-tuning engine of https://thinkube.org[Thinkube].
+
+.TL;DR
+Describe a training job with `m2.TrainingJob(model=..., data=..., method=...)`. `job.plan()` shows what Meep² will do on your machine and why. `job.train()` trains with TRL, and `result.save("out")` writes the adapter. The same job can be a YAML file, run with `meepsquared train job.yaml`.
+
+[source,python]
+----
+import meepsquared as m2
+
+job = m2.TrainingJob(model="Qwen/Qwen3-8B", data="HuggingFaceH4/no_robots", method="qlora", steps=1000)
+
+print(job.plan())     # what meepsquared will do on this machine, and why; nothing is trained yet
+result = job.train()  # prints the plan, then trains
+result.save("out")    # the adapter (the small set of trained LoRA weights)
+----
+
+[source,yaml]
+----
+# job.yaml, run with: meepsquared train job.yaml
+model: Qwen/Qwen3-8B
+data: HuggingFaceH4/no_robots
+method: qlora
+steps: 1000
+----
+
+== Auto mode
+
+You say what to train. Meep² measures the model, the batch and the machine, and decides how to train on it. The plan lists each decision with its reason, so you can see why Meep² chose it, and change it if you want. xref:training-job.adoc[Training jobs] lists the fields, the defaults and their sources.
+
+== What you get
+
+* *Speed.* On one NVIDIA GB10, one epoch of Gemma 4 and Qwen 3.5 trains 2.2 to 2.9 times faster than with Unsloth at its fastest setting, and 3.9 to 5.7 times faster than with TRL at its default settings, with the same held-out loss. On Llama 3.1 Meep² is slightly slower than Unsloth at its fastest. xref:benchmarks.adoc[Benchmarks] has the numbers, the memory each one costs, and the scripts and notebooks that made them.
+* *Correct training on current models.* Padding-free batches keep the examples apart in the gated DeltaNet layers of Qwen3.5 and Qwen3.6; SentencePiece tokenizers write chat templates without stray spaces.
+* *Large models on small machines.* A 67 GB checkpoint loads in about a minute on a GPU that shares the system's memory; on several consumer GPUs, DDP, FSDP2 and a model spread over both GPUs work over plain PCIe.
+* *A permissive licence.* Meep² is Apache-2.0 and depends only on permissively licensed packages.
+
+== How it works
+
+A training job loads the model, adds the adapters, measures the memory one batch needs, and builds TRL's trainer from those measurements. Under it are Meep²'s lower-level calls, which you can also use directly: xref:api.adoc[API].
+
+Meep² loads the model and adds the adapters with Transformers and PEFT, and patches TRL's trainers so that a model Meep² loaded is trained the way Meep² prepared it: padding-free when the model allows it, with Liger Kernel's fused layers and loss, with the right precision and optimizer for the number of GPUs. Nothing changes for a model Meep² did not load.
+
+The speed comes from parts others wrote, put together and tuned on measurements: Liger Kernel, FlashAttention, flash-linear-attention, bitsandbytes, and Axolotl's LoRA kernels; Meep² adds the pieces between them, such as the size of the loss's chunks and LoRA computed on the tokens routed to each expert.
+
+== Next
+
+* xref:get-started.adoc[Get started] installs Meep² and runs a first training job.
+* xref:training-job.adoc[Training jobs] describes the job, the plan and the result.
+* The https://github.com/thinkube/meepsquared/tree/main/notebooks[tutorial notebooks] go from LoRA on a chat model to a mixture of experts, GRPO and several GPUs, each explaining the idea it uses, on data you can replace with your own.
+* xref:from-unsloth.adoc[Coming from Unsloth] shows how code written for Unsloth runs on Meep², and the training job that does the same.

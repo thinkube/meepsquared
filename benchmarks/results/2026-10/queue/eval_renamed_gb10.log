@@ -1,0 +1,7 @@
+13:09:31 started qwen unsloth shared evaluation, renamed job cbb9b254-0c37-4d53-9599-37991bb64fdb kernel llebre
+13:16:32 qwen unsloth shared evaluation, renamed completed 
+    13:11:04 sft.py --arm trl --label qwen-unsloth-eval-trl --model Qwen/Qwen3.5-9B --method lora --source thinkube --steps 1137 --warmup 10 --seed 42 --plan /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/plans/qwen-epoch.json --eval-rows 400 --eval-only --adapter /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-unsloth-renamed
+    loaded 256 adapter weights from /home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-unsloth-renamed
+    RESULT eval-only {"arm": "qwen-unsloth-eval-trl", "model": "Qwen/Qwen3.5-9B", "adapter": "/home/thinkube/thinkube/notebooks/llebre/benchmarks/results/round2/adapters/qwen-unsloth-renamed", "eval_loss": 1.781137}
+    13:16:04 EXIT 0
+chain done; failed: none

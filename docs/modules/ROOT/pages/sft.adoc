@@ -1,0 +1,155 @@
+= LoRA and QLoRA
+:page-type: concept
+
+_What Meep² does for supervised fine-tuning, and the switches that change it._
+
+.TL;DR
+Describe the job with `m2.TrainingJob(model=..., data=..., method="lora")`; `method="qlora"` gives QLoRA (4-bit weights) and `method="fp8"` holds the frozen weights in FP8. The plan says which kernels run, how many layers are checkpointed and why. For conversations, the loss counts the answers only, by default.
+
+== A training job
+
+Supervised fine-tuning (SFT) learns from examples of the behaviour you want: conversations, prompt and completion pairs, or plain text. LoRA (low-rank adaptation) trains a small adapter next to each frozen weight of the model; QLoRA does the same with the frozen weights held in 4 bits.
+
+[source,python]
+----
+import meepsquared as m2
+
+job = m2.TrainingJob(model="Qwen/Qwen3-8B", data="HuggingFaceH4/no_robots", method="qlora", epochs=1)
+print(job.plan())
+result = job.train()
+result.save("qwen3-8b-adapter")
+----
+
+The job decides everything on this page in auto mode, and the plan prints each decision with its reason. Each switch below has a field in `m2.Overrides` (the hardware choices) or `m2.Recipe` (the training choices); xref:training-job.adoc[Training jobs] lists them all.
+
+== What Meep² sets up
+
+* *The tokenizer as the chat template writes.* A SentencePiece tokenizer in legacy mode puts a space after every special token, so `<|im_start|>user` becomes `<|im_start|> user`, and the model trains on text it never saw. Meep² loads tokenizers with `legacy=False`.
+* *Padding-free batches.* The examples of a batch are laid end to end in one row, with position ids that restart at each example, so no compute goes to padding. Meep² turns this on for a model loaded with FlashAttention 2 or 3, or with PyTorch's memory-efficient kernel (`meepsquared_varlen`, see <<_the_attention>>). A model with gated DeltaNet layers (Qwen3.5, Qwen3.6, Qwen3-Next) needs TRL 1.16 or later and flash-linear-attention's kernels: Meep² gives those layers' short convolution the example boundaries, which its PyTorch version ignores, and without both the model trains on padded batches. `Overrides(padding_free=False)` turns it off.
+* *The attention.* FlashAttention 2 where it runs the model; else PyTorch's memory-efficient kernel with packed sequences. See <<_the_attention>>.
+* *Liger Kernel.* Fused RMSNorm, RoPE and SwiGLU, and the output layer and loss computed in chunks, never holding the logits of the whole batch. Meep² makes each chunk 32 times larger than Liger's default (`loss_chunk_budget=32`): on a vocabulary of 256,000 tokens, Liger's default gives chunks of a few dozen tokens, and the GPU waits between thin matrix products. `Overrides(liger=False)` turns Liger off.
+* *QLoRA without float32 norms.* A 4-bit model keeps its norms in the model's dtype; PEFT's usual preparation would turn them to float32.
+
+== Fused LoRA kernels
+
+The fused LoRA kernels compute each adapted projection with its adapter in one function with a hand-written backward pass (Axolotl's kernels, Apache-2.0): the Q, K and V projections of an attention in one kernel, and an MLP's gate, up and down projections with its gated activation in one. The MLP kernel exists for the SiLU of Llama and Qwen, the exact GELU, and the tanh GELU of Gemma. Auto mode uses the kernels where they import (the `qlora` extra) and the MLP's activation has one, and the plan says why when it does not. `Overrides(fused_lora=True)` refuses another activation; `Overrides(fused_lora=False)` leaves them off. In the lower-level calls, the same switch is `get_peft_model(fused_lora=...)`, with `"auto"` as the default. xref:benchmarks.adoc[Benchmarks] has what they add.
+
+== Frozen weights in FP8
+
+`method="fp8"` (in the lower-level calls, `from_pretrained(..., load_in_fp8=True)`) holds the frozen linear layers of the decoder as FP8 (e4m3) with one scale per tensor, once the adapters are added. Each product with them runs on the GPU's FP8 tensor cores, its input quantized on the way in by one fused kernel, and the backward pass runs the same kind of product for the input's gradient; a frozen weight needs no gradient, so no activation is kept for it. The weights take half the memory of BF16, and on an NVIDIA GB10 each product is about 1.6 times faster. The adapters, the embeddings, the norms and the output layer stay in BF16.
+
+One scale per tensor is the recipe of NVIDIA's Transformer Engine (current scaling) and the fast path on the GB10. As any quantization, it changes the numbers slightly; xref:benchmarks.adoc[Benchmarks] compares its loss with the BF16 training. It needs a GPU of compute capability 8.9 or later (Ada, Hopper, Blackwell; not the RTX 3090), and is not combined with 4-bit weights. The fused LoRA kernels run their base products in FP8 too, so the defaults keep them. A merged save dequantizes the weights back to BF16. On a mixture of experts, the expert stacks that carry adapters are held as FP8 too, with one scale per expert; see xref:mixture-of-experts.adoc#_expert_stacks_in_fp8[Expert stacks in FP8].
+
+== Compiled layers
+
+Compiling turns each decoder layer into one region with `torch.compile`, with dynamic shapes, when the trainer is built. A model with many layers and many small operations per layer (Gemma 4 has 58 layers) otherwise keeps the GPU waiting for the CPU to launch its kernels; compiling turns a layer's element-wise operations into a few fused kernels. The first steps are slower while the layers compile. Auto mode compiles where it pays: a model whose attention runs inside the compiled region (SDPA), or between two compiled pieces of each layer (`meepsquared_varlen`), and has no linear-attention layers. It gains nothing with FlashAttention, which stays outside the region, and a model with linear-attention layers (Qwen3.5) recompiles at every step. `Overrides(compile_layers=True)` or `False` sets it by hand; in the lower-level calls, `get_peft_model(compile_layers=...)`.
+
+== Gradient checkpointing
+
+The forward pass of a layer produces activations: the tensors its backward pass needs to compute gradients. Keeping them all is the fastest way to train, and the one that holds the most memory. Recomputing is the trade: a layer that keeps less runs part of its forward again in the backward pass, which costs time. Each layer trains in one of three ways:
+
+Keeping everything:: Every activation stays in memory. No extra compute.
+Recomputed whole:: The layer keeps only its input and runs its whole forward again in the backward pass. About a third more compute for the layer, for the least memory.
+Recomputed selectively:: The layer keeps the outputs of its large products (the matrix multiplications of the projections and the MLP, and the attention) and recomputes only the cheap operations around them: the normalizations, the rotary embedding, the activation function, the element-wise work, and LoRA's own small products. The memory is between the two other ways, and the recompute costs a fraction of the whole one. It is PyTorch's selective activation checkpointing, with a policy that keeps every product wider than the LoRA rank and every attention kernel.
+
+=== What auto mode measures and chooses
+
+A training job measures one layer on the largest micro-batch the training runs (see <<_the_batch_measured>>): the memory it holds under each of the three ways, and the time of its forward and backward pass under each. The plan prints the three memory figures and the three times. It then takes the cheapest layout that fits the free memory, keeping 15% of the GPU's memory unused by activations:
+
+. Nothing recomputed, when every layer's activations fit.
+. Else, as few layers recomputed selectively as the memory needs, the rest keeping everything.
+. Else, every layer recomputed selectively, plus as few recomputed whole as fit beside them.
+
+The last case is compared, on the measured times, with the layout without selective recomputation (as few layers recomputed whole as fit, the rest keeping everything), and the faster of the two is taken. On a GPU that shares the system's memory, the free memory is the system's available memory. The layout appears on two lines of the plan: `checkpoint`, the layers recomputed whole, and `selective`, the layers recomputed selectively. The first layers recompute whole, the next selectively, and the rest keep everything.
+
+=== The batch measured
+
+The memory a batch needs depends on its tokens, and the batches a training runs are rarely the largest the settings allow. A training job sets the order of the SFT data itself, so it knows every micro-batch before the training starts. It shuffles the examples of each epoch with the trainer's seed plus the epoch, cuts them into micro-batches (or into groups that fit a token budget), gives each process its share as Accelerate does, and counts the steps and epochs as the trainer counts them. It measures the largest micro-batch of that layout, and the trainer trains that same layout. With padding-free batches, a micro-batch is its examples end to end, each cut to `max_length`, with position ids that restart at each example. With padded batches it is a row per example, each as long as its longest example, rounded up when the trainer pads to a multiple. TRL tokenizes the data when its trainer is built, so a job builds a trainer first, for its tokenized dataset, reads the examples' lengths from it, lays out and measures, and then builds the trainer that trains from the same dataset.
+
+The plan names the batch and compares it with the data's longest examples, which any order could put together: `the largest of the 30 micro-batches this job trains, 3,412 tokens (8 examples, end to end); the data's 8 longest would be 8,192`. The `order` line gives the seed. Measured on Llama 3.1 8B with 240 no_robots conversations, 8 per update, the data's 8 longest examples are 8,192 tokens, and real micro-batches average about 2,500.
+
+A GRPO job generates its sequences as it trains, so it measures at the bound, the micro-batch by `max_length`. A trainer of your own, built with `get_peft_model(use_gradient_checkpointing="auto")`, orders its batches by its own sampler, which Meep² does not set: it measures a micro-batch of the data's longest examples, the bound any order can reach, and says so in the line it prints. A streamed dataset has no lengths ahead, so it measures at the bound too.
+
+=== Setting the layout by hand
+
+`Overrides(checkpointed_layers=N)` sets the layers recomputed whole: `0` for none, the model's layer count for every layer, the least memory. The other layers then keep everything. `Overrides(selective_layers=M)` sets the layers recomputed selectively; given alone, as few layers as the memory needs recompute whole beside them. Both together give the whole layout. The plan marks a value given by hand as yours and shows auto mode's beside it.
+
+In the lower-level calls, `get_peft_model(use_gradient_checkpointing=...)` takes:
+
+* `"auto"`, the default (`"unsloth"` is taken as the same): measured and chosen as above, once the trainer has tokenized the data. It is refused under FSDP and with a model spread over GPUs, where one GPU's free memory is not the measure.
+* `"memory"`, or `True`: every layer recomputed whole.
+* `"selective"`: every layer recomputed selectively.
+* `False`: none.
+* A number of layers, or a fraction of them (`0.5`): the first ones are recomputed whole.
+
+With some layers checkpointed, Meep² sets the layers itself and the trainer is told `gradient_checkpointing=False`; giving `gradient_checkpointing` in the config is then refused.
+
+=== What selective recomputation needs
+
+The policy decides per operation as PyTorch dispatches it: the matrix multiplications (`aten.mm`, `addmm`, `bmm`, `baddbmm`, the FP8 `_scaled_mm`, the experts' `_grouped_mm`), PyTorch's fused attention kernels (the memory-efficient kernel's forward that `meepsquared_varlen` calls among them), and FlashAttention's forward, which flash-attn 2.7 and later register as a PyTorch op. A product with an inner dimension or an output width of at most the LoRA rank is one of LoRA's own and is recomputed. The fused LoRA kernels, Liger's kernels and Meep²'s Triton kernels work under the policy: a kernel the policy cannot see is run again in the recompute, which is what it wants of the cheap ones. Two things it cannot work with are refused with a message that names them, and left out of auto mode's choice:
+
+* Compiled layers (`compile_layers`): a compiled layer runs as one region the policy does not reach inside. A layer is either compiled or recomputed selectively.
+* Linear-attention layers (Qwen3.5, Qwen3.6, Qwen3-Next) with flash-linear-attention installed: their delta-rule kernel is not an operation the policy sees, and selective recomputation is not verified on them.
+
+A FlashAttention older than 2.7 does not register its forward as a PyTorch op; selective recomputation is then refused with the op's name. The routed-expert LoRA kernel of a mixture of experts (see xref:mixture-of-experts.adoc[Mixture of experts]) computes the expert products inside one Triton kernel, so those products are recomputed; the measurement shows what that costs. Liger's rotary embedding is left off when a layer may be recomputed selectively: its kernel rotates q and k in place, over the projection outputs the layer keeps. The plan's `Liger` line says so.
+
+== The answers alone
+
+A conversation has the user's words and the assistant's. A training job counts the loss on the assistant's turns only, by default: with TRL's assistant-only loss where TRL can mask the chat template, else with Meep²'s `train_on_responses_only` and markers it reads from the chat template. The plan's `loss on` line says which; xref:training-job.adoc#_the_loss_on_the_answers[Training jobs] explains how Meep² chooses. `Recipe(answers_only=False)` counts every token.
+
+With the lower-level calls, give `train_on_responses_only` the text the chat template writes before a user turn and before an assistant turn:
+
+[source,python]
+----
+from meepsquared.chat_templates import train_on_responses_only
+
+train_on_responses_only(trainer, instruction_part="<|im_start|>user\n", response_part="<|im_start|>assistant\n")
+----
+
+The loss then counts the tokens after each `response_part` up to the next `instruction_part`, the closing end-of-turn token included, in padded and padding-free batches alike.
+
+== Going further: the lower-level calls
+
+A training job is built on Meep²'s lower-level calls: `MeepLanguageModel.from_pretrained` loads the model, `get_peft_model` adds LoRA, and TRL's `SFTTrainer` trains it. `job.trainer()` gives you that trainer, set up as `job.train()` runs it. To build everything yourself, for example with an `SFTConfig` setting the job does not have, use the calls directly:
+
+[source,python]
+----
+import meepsquared as m2
+from trl import SFTConfig, SFTTrainer
+
+model, tokenizer = m2.MeepLanguageModel.from_pretrained("Qwen/Qwen3-8B", max_seq_length=1024, load_in_4bit=True)
+model = m2.MeepLanguageModel.get_peft_model(model, r=16, lora_alpha=16)
+trainer = SFTTrainer(model=model, processing_class=tokenizer, train_dataset=dataset,
+                     args=SFTConfig(output_dir="out", per_device_train_batch_size=8, max_length=1024))
+trainer.train()
+----
+
+The trainer then takes its settings from the model; xref:trainer-settings.adoc[Trainer settings] says which. These calls do not choose the batch size or the learning rate: the `SFTConfig` you give does. xref:api.adoc[API] lists their arguments.
+
+== The attention
+
+`from_pretrained` loads the model with FlashAttention 2 where it can run the model. FlashAttention 2 and 3 compute heads of at most 256 dimensions. Where a model has wider heads (Gemma 4: 256 in its sliding layers, 512 in its full-attention layers), or FlashAttention 2 is not installed, it loads the model with `meepsquared_varlen` instead. The plan says which, and why:
+
+----
+  attention    meepsquared_varlen (heads of 512: FlashAttention 2 stops at 256; PyTorch's memory-efficient kernel with packed sequences)
+  batches      packed, no padding (PyTorch's memory-efficient kernel keeps the examples apart (cu_seqlens))
+----
+
+`meepsquared_varlen` is an attention implementation that Meep² registers with Transformers. It calls PyTorch's memory-efficient attention kernel, the one behind SDPA's `EFFICIENT_ATTENTION` backend, with the start of each example (`cu_seqlens`). SDPA itself cannot pass these. The kernel has no limit on head width.
+
+* *Packed batches.* Each example attends to itself only. Meep² reads the boundaries from TRL 1.16's `cu_seq_lens_q`, or from the position ids, as Transformers' FlashAttention path does.
+* *Padded batches* (GRPO, or `Overrides(padding_free=False)`). The real tokens of each row are computed as one packed row, and put back in place.
+* *Sliding windows.* A layer with a window of W sees itself and the W - 1 tokens before it, as Transformers' masks do.
+* *Grouped-query attention.* The key and value heads are repeated for the kernel, and their gradients summed back.
+
+Its forward and backward stay outside compiled layers, and selective recomputation keeps its output. `Overrides(attention=...)` or `from_pretrained(attn_implementation=...)` sets the attention by hand, and stands as given.
+
+On a DGX Spark (GB10), for 8 conversations of Gemma 4 E4B (about 3,600 tokens), one layer's attention took 4.6 ms forward and backward with heads of 256, and 11.3 ms with heads of 512. The same batch padded to 8 x 1,024 through SDPA took 19.8 and 62.0 ms.
+
+== Limits
+
+* Padding-free batches need FlashAttention or `meepsquared_varlen`; with `Overrides(attention="sdpa")` a model trains on padded batches.
+* `meepsquared_varlen` runs on a CUDA GPU. It refuses logit soft-capping, attention sinks, a sliding window without a causal mask, and head widths that are not a multiple of 8 (16-bit) or 4 (float32).
+* The fused LoRA kernels cover MLPs with the SiLU, exact GELU or tanh GELU activation.
+* `loss_chunk_budget` applies to every model in the process. A training job uses the default; set it with `from_pretrained(loss_chunk_budget=...)`.
+* One training job is one schedule: a training split over several sessions, continuing one learning-rate schedule, is not supported.

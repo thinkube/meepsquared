@@ -1,0 +1,73 @@
+= Trainer settings
+:page-type: reference
+
+_How a training job sets up TRL's trainers, what TRL's SFTTrainer and GRPOTrainer take from a Meep² model, and when your config wins._
+
+.TL;DR
+A training job builds TRL's `SFTTrainer` or `GRPOTrainer` from its plan, and `job.trainer()` returns it. With the lower-level calls, importing Meep² makes those trainers read their settings from a model Meep² loaded; a setting you give in `SFTConfig` or `GRPOConfig` is kept, except where the table says it is refused. A model Meep² did not load trains as TRL alone would train it.
+
+== What a training job sets
+
+A training job writes these settings into TRL's config, from its plan. Each one is a line of the plan, with its reason; xref:training-job.adoc[Training jobs] gives the defaults and their sources.
+
+[cols="1,3",options="header"]
+|===
+| TRL setting | From the plan
+
+| `per_device_train_batch_size` | The micro-batch: the largest share of the effective batch that fits, measured; or `Overrides(micro_batch=...)`.
+| `gradient_accumulation_steps` | The effective batch divided by the micro-batch and the number of processes.
+| `learning_rate` | By the model's size, or `Recipe(learning_rate=...)`.
+| `lr_scheduler_type`, `warmup_steps` | Constant after a warm-up, or cosine decay to a tenth with `Recipe(schedule="cosine")`.
+| `optim` | `adamw_8bit`, or `Recipe(optimizer=...)`.
+| `max_steps` or `num_train_epochs` | The job's `steps` or `epochs`; one epoch when neither is given.
+| `max_length` | SFT: `Recipe(max_length=...)`, 1024 by default.
+| `num_generations` | GRPO: `Recipe(generations=...)`, TRL's default otherwise.
+| `padding_free` | SFT: as the model allows, or `Overrides(padding_free=...)`.
+| `assistant_only_loss`, `completion_only_loss` | SFT: the loss on the answers, as `Recipe(answers_only=...)` decides (see xref:training-job.adoc#_the_loss_on_the_answers[Training jobs]).
+| `max_grad_norm`, `weight_decay` | `Recipe(max_grad_norm=...)`, `Recipe(weight_decay=...)`; TRL's defaults otherwise.
+| `max_completion_length`, `temperature`, `top_p`, `top_k`, `chat_template_kwargs` | GRPO: the recipe's fields of the same names; TRL's defaults otherwise.
+| `use_vllm`, `vllm_mode`, `vllm_max_model_length` | GRPO with `Overrides(vllm=True)`: `True`, `"colocate"`, and the job's `max_length`.
+| `report_to` | The job's `report_to`; Transformers' default otherwise.
+| `bf16`, `fp16` | The dtype the model computes in.
+| `logging_steps` | `1`: the loss of every step is logged.
+| `output_dir` | The job's `output`.
+|===
+
+The layers recomputed whole or selectively are set on the model, as the plan measured them or as `Overrides(checkpointed_layers=..., selective_layers=...)` gives. Other settings are TRL's defaults. To change one the job does not have, build the trainer with the lower-level calls (see xref:sft.adoc[LoRA and QLoRA]).
+
+== Settings taken from the model
+
+With the lower-level calls, the trainer takes these from a model Meep² loaded. A training job goes through the same path.
+
+[cols="1,1,3",options="header"]
+|===
+| Setting | Trainer | Value, unless your config gives it
+
+| `padding_free` | SFT | On when `from_pretrained` found the model can train that way (see xref:sft.adoc[LoRA and QLoRA]).
+| `use_liger_kernel` | SFT, GRPO | As `from_pretrained(liger=...)` set it.
+| `liger_kernel_config` | SFT, GRPO | `{"swiglu": False}` added with `target_parameters`, whose expert modules PEFT wraps, and with the fused LoRA kernels; `{"rope": False}` added where a layer may be recomputed selectively, whose kept projection outputs Liger's rotary embedding would write over (a config that keeps it on is then refused).
+| `gradient_checkpointing` | SFT, GRPO | As `get_peft_model(use_gradient_checkpointing=...)` set it, non-reentrant. With `"auto"`, the measurement runs once the trainer has tokenized the data, on a micro-batch of its longest examples: the trainer orders its batches itself.
+| `ddp_find_unused_parameters` | SFT, GRPO | `False` with several processes.
+| `bf16` | SFT, GRPO | `False` under FSDP; the model is loaded in BF16 already.
+|===
+
+== Settings refused
+
+[cols="1,3",options="header"]
+|===
+| Setting | Why
+
+| `bf16=True` under FSDP
+| Accelerate turns the BF16 weights to FP32 before sharding, which doubles their memory and the traffic between the GPUs.
+
+| A bitsandbytes optimizer (`adamw_8bit`, `paged_adamw_8bit`, ...) under FSDP
+| bitsandbytes cannot update FSDP2's sharded parameters. Use `adamw_torch_fused`.
+|===
+
+== Other adjustments
+
+* *No `nn.DataParallel`.* One process with a model on one GPU uses that GPU only, whatever number of GPUs it sees.
+* *`max_length` with padding-free batches on TRL 1.x.* TRL 1.x refuses `padding_free` with `max_length` and no packing. Whether Meep² turns padding-free on or your config gives `padding_free=True`, Meep² builds the trainer without `max_length` and cuts each example to it as it reaches the data collator, keeping its start, as TRL 0.29 does.
+* *Fused LoRA after Liger.* With the fused LoRA kernels on, they are applied again after the trainer is built, in place of the SwiGLU forward Liger set.
+* *A model spread over GPUs.* After the trainer is built, each part runs on its own GPU again, and the batch's token count and the loss move to the GPUs they are needed on.
+* *No config at all.* `SFTTrainer(model=model, ...)` without `args` gets a config named after the model, with the settings above.

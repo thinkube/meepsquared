@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "meepsquared"
+version = "0.1.0"
+description = "Fast LoRA and QLoRA fine-tuning with permissively licensed components"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Alejandro Martínez Corriá and the Thinkube contributors" }]
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# The versions Meep² is tested with: those of NVIDIA's PyTorch container 26.03 on the DGX Spark, where the
+# benchmarks ran. torch 2.11 comes from the environment (the container, or PyTorch's wheel for CUDA 13.0),
+# so it is not a dependency. requests: TRL's GRPO trainer imports it. pyyaml: a training job written as YAML.
+dependencies = [
+    "transformers==5.20.2",
+    "trl==1.16.0",
+    "peft==0.21.2",
+    "datasets==4.8.4",
+    "accelerate==1.15.0",
+    "liger-kernel==0.8.5",
+    "bitsandbytes==0.50.2",
+    "flash-linear-attention==0.6.0",
+    "fla-core==0.6.0",
+    "requests==2.32.5",
+    "pyyaml==6.0.3",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+meepsquared = "meepsquared.cli:main"
+
+[project.urls]
+Repository = "https://github.com/thinkube/meepsquared"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/meepsquared"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
