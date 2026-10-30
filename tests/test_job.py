@@ -240,8 +240,8 @@ def test_micro_batch_halves_within_the_effective_batch():
 
 def test_fits_counts_the_inputs_and_one_layer():
     # 10 GiB free of 16: 15% kept back leaves 7.6 GiB
-    assert _checkpointing.fits(10 * GIB, 16 * GIB, 4 * GIB, 2 * GIB)
-    assert not _checkpointing.fits(10 * GIB, 16 * GIB, 6 * GIB, 2 * GIB)
+    assert _checkpointing.fits(10 * GIB, int(_checkpointing.MARGIN * 16 * GIB), 4 * GIB, 2 * GIB)
+    assert not _checkpointing.fits(10 * GIB, int(_checkpointing.MARGIN * 16 * GIB), 6 * GIB, 2 * GIB)
 
 
 def test_data_formats():

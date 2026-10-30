@@ -21,9 +21,10 @@ not set, on the data's longest examples (see longest_examples), when the
 trainer is built. The measure is the memory the layer holds under each of
 the three ways and the time of its forward and backward pass under each,
 and the cheapest layout that fits the free memory is chosen (see choose), keeping
-MARGIN of the GPU's memory free for the loss, the optimizer and the backward
-pass's own buffers. On a GPU that shares the system's memory, the free memory
-is the system's MemAvailable.
+a margin free for the loss, the optimizer and the backward pass's own buffers:
+MARGIN of the GPU's memory, or, on a GPU that shares the system's memory, of
+the memory free for the training (see margin). There the free memory is the
+system's MemAvailable, within the allocator's cap.
 """
 
 import dataclasses
@@ -382,23 +383,40 @@ def time_layer(model, shape: Shape, settings: tuple, repeats: int = 3) -> dict:
     return seconds
 
 
-def fits(free: int, total: int, every: int, per_layer: int) -> bool:
-    """Whether a batch trains in `free` minus the margin with every layer checkpointed.
+def margin(device, free: int, total: int) -> int:
+    """The bytes kept free for the loss, the optimizer's step and the passes' own buffers, out of `free`.
+
+    MARGIN of the GPU's memory (`total`). On a GPU that shares the system's
+    memory, MARGIN of the memory free for the training (`free`): there the
+    GPU's memory is the machine's, and the operating system, the page cache
+    and the other processes hold much of it, which the allocator's cap
+    already keeps from this process (meepsquared._unified_memory). The timed
+    steps check the real peak against the budget (peak_budget) either way.
+    """
+    from meepsquared import _unified_memory
+
+    if device.type == "cuda" and _unified_memory.shares_system_memory(device.index or 0):
+        return int(MARGIN * free)
+    return int(MARGIN * total)
+
+
+def fits(free: int, margin: int, every: int, per_layer: int) -> bool:
+    """Whether a batch trains in `free` minus `margin` (see margin) with every layer checkpointed.
 
     It then holds every checkpointed layer's input (`every`) and, in the
     backward pass, the activations of the one layer being recomputed.
     """
-    return every + per_layer <= free - MARGIN * total
+    return every + per_layer <= free - margin
 
 
-def layers_to_checkpoint(free: int, total: int, per_layer: int, layer_count: int) -> int:
+def layers_to_checkpoint(free: int, margin: int, per_layer: int, layer_count: int) -> int:
     """How many layers to checkpoint so that the others' activations fit in `free` minus the margin."""
-    usable = free - MARGIN * total
+    usable = free - margin
     kept = max(0, math.floor(usable / per_layer)) if per_layer > 0 else layer_count
     return max(0, layer_count - kept)
 
 
-def layout_fits(free: int, total: int, per_layer: int, per_selective: Optional[int], layer_count: int,
+def layout_fits(free: int, margin: int, per_layer: int, per_selective: Optional[int], layer_count: int,
                 layout: Recompute) -> bool:
     """Whether the activations a layout keeps fit in `free` minus the margin.
 
@@ -408,20 +426,20 @@ def layout_fits(free: int, total: int, per_layer: int, per_selective: Optional[i
     with every layer checkpointed (see fits).
     """
     held = layout.kept(layer_count) * per_layer + layout.selective * (per_selective or 0)
-    return held <= free - MARGIN * total
+    return held <= free - margin
 
 
-def fewest_whole(free: int, total: int, per_layer: int, per_selective: Optional[int], layer_count: int,
+def fewest_whole(free: int, margin: int, per_layer: int, per_selective: Optional[int], layer_count: int,
                  selective: int) -> int:
     """The fewest layers recomputed whole that fit with `selective` layers recomputed selectively; the rest keep
     everything."""
     for whole in range(0, layer_count - selective + 1):
-        if layout_fits(free, total, per_layer, per_selective, layer_count, Recompute(whole, selective)):
+        if layout_fits(free, margin, per_layer, per_selective, layer_count, Recompute(whole, selective)):
             return whole
     return layer_count - selective
 
 
-def choose(free: int, total: int, per_layer: int, per_selective: Optional[int], times: Optional[dict],
+def choose(free: int, margin: int, per_layer: int, per_selective: Optional[int], times: Optional[dict],
            layer_count: int) -> Recompute:
     """The cheapest layout that fits `free` minus the margin.
 
@@ -438,17 +456,17 @@ def choose(free: int, total: int, per_layer: int, per_selective: Optional[int], 
     candidates = [Recompute(0, 0)]
     if per_selective is not None:
         selective = next((s for s in range(1, layer_count + 1)
-                          if layout_fits(free, total, per_layer, per_selective, layer_count, Recompute(0, s))), None)
+                          if layout_fits(free, margin, per_layer, per_selective, layer_count, Recompute(0, s))), None)
         if selective is not None:
             candidates.append(Recompute(0, selective))
         whole = next((w for w in range(0, layer_count + 1)
-                      if layout_fits(free, total, per_layer, per_selective, layer_count, Recompute(w, layer_count - w))),
+                      if layout_fits(free, margin, per_layer, per_selective, layer_count, Recompute(w, layer_count - w))),
                      layer_count)
         candidates.append(Recompute(whole, layer_count - whole))
-    candidates.append(Recompute(layers_to_checkpoint(free, total, per_layer, layer_count), 0))
+    candidates.append(Recompute(layers_to_checkpoint(free, margin, per_layer, layer_count), 0))
     fitting = []
     for candidate in candidates:
-        if candidate not in fitting and layout_fits(free, total, per_layer, per_selective, layer_count, candidate):
+        if candidate not in fitting and layout_fits(free, margin, per_layer, per_selective, layer_count, candidate):
             fitting.append(candidate)
     if not fitting:
         return Recompute(layer_count, 0)
@@ -518,14 +536,14 @@ def allocator_cap_bytes(device) -> Optional[int]:
     return int(fraction * torch.cuda.get_device_properties(device).total_memory)
 
 
-def peak_budget(device) -> Optional[int]:
+def peak_budget(device, margin: int) -> Optional[int]:
     """The most this process may hold at the peak of a step: the allocator's cap where set, else the GPU's memory,
-    less the margin. None off the GPU, where nothing measures the peak."""
+    less `margin` (see margin). None off the GPU, where nothing measures the peak."""
     if device.type != "cuda":
         return None
     total = torch.cuda.get_device_properties(device).total_memory
     cap = allocator_cap_bytes(device)
-    return (cap if cap is not None else total) - int(MARGIN * total)
+    return (cap if cap is not None else total) - margin
 
 
 # Bytes of optimizer state per trainable parameter, by the optimizer's name (Transformers' optim names): two 8-bit
@@ -595,7 +613,7 @@ def resolve_auto(model, shape: Shape, compiled: bool = False, refused: Optional[
     device = next(base.parameters()).device
     figures = measure_figures(model, shape, compiled, refused)
     free, total = free_memory(device)
-    layout = choose(free, total, figures.per_layer, figures.per_selective, figures.times, figures.layer_count)
+    layout = choose(free, margin(device, free, total), figures.per_layer, figures.per_selective, figures.times, figures.layer_count)
     set_checkpointed(model, layout)
     if not os.environ.get("MEEPSQUARED_QUIET"):
         refusal = refused or _selective.refusal(model, compiled)

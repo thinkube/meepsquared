@@ -47,10 +47,10 @@ def test_auto_checkpoints_every_layer_until_measured(tiny_model):
 def test_layers_to_checkpoint():
     gib = 2**30
     # 100 GiB free of 128: 15% kept back leaves 80.8 GiB, room for 40 layers of 2 GiB
-    assert _checkpointing.layers_to_checkpoint(100 * gib, 128 * gib, 2 * gib, 32) == 0
-    assert _checkpointing.layers_to_checkpoint(100 * gib, 128 * gib, 4 * gib, 32) == 12
-    assert _checkpointing.layers_to_checkpoint(10 * gib, 128 * gib, 4 * gib, 32) == 32
-    assert _checkpointing.layers_to_checkpoint(100 * gib, 128 * gib, 0, 32) == 0
+    assert _checkpointing.layers_to_checkpoint(100 * gib, int(_checkpointing.MARGIN * 128 * gib), 2 * gib, 32) == 0
+    assert _checkpointing.layers_to_checkpoint(100 * gib, int(_checkpointing.MARGIN * 128 * gib), 4 * gib, 32) == 12
+    assert _checkpointing.layers_to_checkpoint(10 * gib, int(_checkpointing.MARGIN * 128 * gib), 4 * gib, 32) == 32
+    assert _checkpointing.layers_to_checkpoint(100 * gib, int(_checkpointing.MARGIN * 128 * gib), 0, 32) == 0
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="measures GPU memory")
@@ -111,3 +111,16 @@ def test_only_the_decoders_layers_count():
 
     model = Multimodal()
     assert _checkpointing.layers(model) == list(model.language_model)
+
+
+def test_the_margin_is_a_share_of_the_gpus_memory_or_on_shared_memory_of_whats_free(monkeypatch):
+    from meepsquared import _unified_memory
+
+    gib = 2**30
+    assert _checkpointing.margin(torch.device("cpu"), 30 * gib, 122 * gib) == int(_checkpointing.MARGIN * 122 * gib)
+    monkeypatch.setattr(_unified_memory, "shares_system_memory", lambda device=0: False)
+    assert _checkpointing.margin(torch.device("cuda", 0), 30 * gib, 24 * gib) == int(_checkpointing.MARGIN * 24 * gib)
+    # On a GB10 the GPU's total is the machine's memory; the margin is a share of what is free for the training
+    monkeypatch.setattr(_unified_memory, "shares_system_memory", lambda device=0: True)
+    assert _checkpointing.margin(torch.device("cuda", 0), 30 * gib, 122 * gib) == int(_checkpointing.MARGIN * 30 * gib)
+

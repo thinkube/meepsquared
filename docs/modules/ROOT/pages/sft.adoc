@@ -54,7 +54,7 @@ Recomputed selectively:: The layer keeps the outputs of its large products (the 
 
 === What auto mode measures and chooses
 
-A training job measures one layer on the largest micro-batch the training runs (see <<_the_batch_measured>>): the memory it holds under each of the three ways, and the time of its forward and backward pass under each. The plan prints the three memory figures and the three times. It then takes the cheapest layout that fits the free memory, keeping 15% of the GPU's memory unused by activations:
+A training job measures one layer on the largest micro-batch the training runs (see <<_the_batch_measured>>): the memory it holds under each of the three ways, and the time of its forward and backward pass under each. The plan prints the three memory figures and the three times. It then takes the cheapest layout that fits the free memory, keeping a margin unused by activations, 15% of the GPU's memory or, on a GPU that shares the system's memory, 15% of the memory free for the training:
 
 . Nothing recomputed, when every layer's activations fit.
 . Else, as few layers recomputed selectively as the memory needs, the rest keeping everything.

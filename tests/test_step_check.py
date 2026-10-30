@@ -49,7 +49,7 @@ def checked(monkeypatch, tiny_model, peaks, layout, given=False, per_layer=GIB):
         return timing(peak)
 
     monkeypatch.setattr(_sessions, "time_steps", fake_time_steps)
-    monkeypatch.setattr(_checkpointing, "peak_budget", lambda device: 10 * GIB)
+    monkeypatch.setattr(_checkpointing, "peak_budget", lambda device, margin: 10 * GIB)
     _checkpointing.set_checkpointed(model, layout)
     model._meepsquared_gradient_checkpointing = layout
     shape = _checkpointing.Shape(2, 8)

@@ -1462,7 +1462,8 @@ class TrainingJob:
 
         def fits(micro: int, budget_rows: Optional[int]) -> bool:
             every, per_layer, free, total = measurement(micro, budget_rows)
-            return _checkpointing.fits(free - reserved(total) - trained_bytes, total, every, per_layer)
+            return _checkpointing.fits(free - reserved(total) - trained_bytes,
+                                       _checkpointing.margin(device, free, total), every, per_layer)
 
         def largest_fitting(start: int, smaller: Callable[[int], int], as_budget: bool = False) -> int:
             """From `start` down, by `smaller`: the first micro-batch that fits with every layer checkpointed;
@@ -1474,7 +1475,7 @@ class TrainingJob:
                     every, per_layer, free, total = measurement(1, rows)
                     raise RuntimeError(f"the smallest micro-batch ({batch_text(1, rows)}) does not fit with every "
                                        f"layer checkpointed: it holds {_gib(every + per_layer)}, and "
-                                       f"{_gib(free - reserved(total) - trained_bytes - _checkpointing.MARGIN * total)} "
+                                       f"{_gib(free - reserved(total) - trained_bytes - _checkpointing.margin(device, free, total))} "
                                        f"is free beyond the margin, the {_gib(trained_bytes)} of the trainable "
                                        "parameters' gradients and optimizer state" + (" and vLLM's share" if vllm else "")
                                        + "; "
@@ -1523,8 +1524,9 @@ class TrainingJob:
         if measure:
             every, per_layer, free, total = measurement(micro, slots)
             figures = _measure_figures(peft_model, shape(micro, slots), every, per_layer, compiled)
-            usable, usable_total = free - reserved(total) - trained_bytes, total
-            auto_layout = _checkpointing.choose(usable, total, figures.per_layer, figures.per_selective,
+            usable = free - reserved(total) - trained_bytes
+            margin_bytes = _checkpointing.margin(device, free, total)
+            auto_layout = _checkpointing.choose(usable, margin_bytes, figures.per_layer, figures.per_selective,
                                                 figures.times, layer_count)
             checkpointed_auto, selective_auto = auto_layout.whole, auto_layout.selective
             free_bytes = free
@@ -1538,7 +1540,7 @@ class TrainingJob:
                                  if selective_refusal else ""))
         else:
             checkpointed_auto = selective_auto = None
-            free_bytes = None
+            free_bytes = margin_bytes = None
             micro_why = checkpoint_why = "the model is not on a CUDA GPU"
         whole_auto, whole_why = checkpointed_auto, checkpoint_why
         if overrides.checkpointed_layers is not None:
@@ -1793,7 +1795,7 @@ class TrainingJob:
             # against the budget. A peak over it puts more layers to recompute whole and times again.
             timing, layout, corrected = _timed_steps_fitting(
                 trainer, peft_model, largest, accumulation, timed, eval_largest, layout, figures, layer_count,
-                device, overrides.checkpointed_layers is not None)
+                device, overrides.checkpointed_layers is not None, margin_bytes)
             if corrected:
                 for i, d in enumerate(decisions):
                     if d.name == "checkpointed_layers":
@@ -1945,7 +1947,7 @@ def _liger_text(args) -> str:
 
 
 def _timed_steps_fitting(trainer, peft_model, shape, accumulation: int, timed: int, eval_shape, layout, figures,
-                         layer_count: int, device, layout_given: bool):
+                         layer_count: int, device, layout_given: bool, margin: Optional[int]):
     """Time the steps on the largest micro-batch (meepsquared._sessions.time_steps) and check their real peak
     against the memory.
 
@@ -1960,7 +1962,7 @@ def _timed_steps_fitting(trainer, peft_model, shape, accumulation: int, timed: i
 
     from meepsquared import _checkpointing, _sessions
 
-    budget = _checkpointing.peak_budget(device)
+    budget = _checkpointing.peak_budget(device, margin) if margin is not None else None
     corrected = ""
     for attempt in range(3):
         try:

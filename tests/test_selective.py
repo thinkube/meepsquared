@@ -187,7 +187,7 @@ TIMES = {"none": 0.030, "selective": 0.033, "whole": 0.040}
 
 
 def choose(per_layer, per_selective=None, times=TIMES, free=FREE):
-    return _checkpointing.choose(free, TOTAL, per_layer, per_selective, times, LAYERS)
+    return _checkpointing.choose(free, int(_checkpointing.MARGIN * TOTAL), per_layer, per_selective, times, LAYERS)
 
 
 def test_nothing_is_recomputed_when_everything_fits():
@@ -204,7 +204,7 @@ def test_selective_on_as_few_layers_as_needed():
 def test_selective_on_every_layer_plus_whole_on_as_few_as_fit():
     # 32 selective layers hold 24, too much; w whole layers leave (32 - w) * 0.75 <= 16.4 at w = 11
     # The rule without selective recomputation: 16 layers keeping everything fit, 16 recompute whole
-    assert _checkpointing.layers_to_checkpoint(FREE, TOTAL, GIB, LAYERS) == 16
+    assert _checkpointing.layers_to_checkpoint(FREE, int(_checkpointing.MARGIN * TOTAL), GIB, LAYERS) == 16
     # Without times, the order of preference holds: every layer selective plus the fewest whole
     assert choose(GIB, 3 * GIB // 4, times=None) == _checkpointing.Recompute(11, 21)
     # 11 whole + 21 selective at 31 ms cost 11 x 40 + 21 x 31 = 1091 ms; 16 whole + 16 keeping, 16 x 40 + 16 x 30 = 1120
@@ -229,8 +229,8 @@ def test_nothing_fits_recomputes_every_layer_whole():
 
 def test_fewest_whole_beside_the_users_selective_layers():
     # 10 selective layers (0.5 GiB each) and 22 keeping everything hold 27; w whole leave 27 - w <= 16.4 at w = 11
-    assert _checkpointing.fewest_whole(FREE, TOTAL, GIB, GIB // 2, LAYERS, selective=10) == 11
-    assert _checkpointing.fewest_whole(FREE, TOTAL, GIB // 4, GIB // 8, LAYERS, selective=10) == 0
+    assert _checkpointing.fewest_whole(FREE, int(_checkpointing.MARGIN * TOTAL), GIB, GIB // 2, LAYERS, selective=10) == 11
+    assert _checkpointing.fewest_whole(FREE, int(_checkpointing.MARGIN * TOTAL), GIB // 4, GIB // 8, LAYERS, selective=10) == 0
 
 
 LENGTHS = [5, 300, 1024, 40, 900]
