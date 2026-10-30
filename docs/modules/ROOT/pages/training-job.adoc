@@ -445,7 +445,7 @@ The status file:: `--status-file` writes the training's state as JSON: at the st
 | `seconds_per_step`, `eta_seconds` | This session's mean time per step after its first, and the time left at that pace; `null` until the second step. Neither counts the evaluations' time. The plan holds the timed estimate, which counts them.
 | `eval_loss`, `eval_step` | The latest evaluation's loss and step, a resumed training's earlier sessions' too; `null` before the first or without evaluation.
 | `checkpoint` | The latest checkpoint saved, or found at the end; `null` when there is none.
-| `milestones`, `milestone_seconds`, `next_milestone` | With `milestones`: each finished milestone's record (its step, folder, seconds and scores), earlier sessions' too; the seconds the latest took; the step of the next one, `null` after the last.
+| `milestones`, `milestone_seconds`, `next_milestone` | `null` without `milestones`. With them: each finished milestone's record (its step, folder, seconds and scores), earlier sessions' too; the seconds the latest took; the step of the next one, `null` after the last.
 | `plan` | `plan.to_dict()`; `null` while planning.
 | `error` | Why the training failed; `null` otherwise.
 | `updated` | When the file was written, in ISO 8601, UTC.

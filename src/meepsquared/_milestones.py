@@ -130,8 +130,9 @@ def loop_end(ids: list) -> Optional[tuple]:
     """(period, repeats) when `ids` ends with a loop as LOOP_* define it, else None."""
     for period in range(1, LOOP_MAX_PERIOD + 1):
         repeats = max(LOOP_MIN_REPEATS, -(-LOOP_MIN_SPAN // period))
+        # A longer block can need fewer tokens than a shorter one (3 x 6 = 18, 4 x 4 = 16): each is checked
         if len(ids) < repeats * period:
-            break
+            continue
         block = ids[len(ids) - period:]
         if all(ids[len(ids) - (k + 1) * period:len(ids) - k * period] == block for k in range(1, repeats)):
             return period, repeats

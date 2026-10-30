@@ -72,7 +72,7 @@ class Status:
         self.path = Path(path)
         self.fields = {"state": "planning", "step": 0, "total_steps": 0, "loss": None, "seconds_per_step": None,
                        "eta_seconds": None, "checkpoint": None, "plan": None, "error": None, "eval_loss": None,
-                       "eval_step": None}
+                       "eval_step": None, "milestones": None, "milestone_seconds": None, "next_milestone": None}
 
     def update(self, **fields) -> None:
         unknown = set(fields) - set(self.fields)

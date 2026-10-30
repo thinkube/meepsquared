@@ -449,7 +449,7 @@ def test_train_runs_and_saves_the_adapter(tiny_model, tokenizer, tmp_path):
     assert isinstance(result.final_loss, float)
     assert result.peak_memory_bytes is None  # trained on the CPU
     assert set(result.to_dict()) == {"steps", "seconds", "final_loss", "peak_memory_bytes", "output", "paused",
-                                     "checkpoint", "evaluations"}
+                                     "checkpoint", "evaluations", "milestones"}
     # Transformers saves a checkpoint at the last step
     assert result.paused is False and result.checkpoint == str(tmp_path / "out" / "checkpoint-2")
     result.save(tmp_path / "adapter")
