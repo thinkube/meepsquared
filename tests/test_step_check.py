@@ -54,7 +54,7 @@ def checked(monkeypatch, tiny_model, peaks, layout, given=False, per_layer=GIB):
     model._meepsquared_gradient_checkpointing = layout
     shape = _checkpointing.Shape(2, 8)
     result = job_module._timed_steps_fitting(None, model, shape, 1, 3, None, layout, SimpleNamespace(per_layer=per_layer),
-                                             layers, torch.device("cpu"), given)
+                                             layers, torch.device("cpu"), given, 0)
     return result, timed, layers
 
 

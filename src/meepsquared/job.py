@@ -1547,7 +1547,7 @@ class TrainingJob:
             layout = _checkpointing.Recompute(overrides.checkpointed_layers, overrides.selective_layers or 0)
         elif overrides.selective_layers is not None:
             # The user's selective layers, and as few recomputed whole as the memory needs beside them
-            whole_auto = _checkpointing.fewest_whole(usable, usable_total, figures.per_layer, figures.per_selective,
+            whole_auto = _checkpointing.fewest_whole(usable, margin_bytes, figures.per_layer, figures.per_selective,
                                                      layer_count, overrides.selective_layers)
             whole_why = (f"the fewest layers recomputed whole that fit with {overrides.selective_layers} "
                          f"selective; {checkpoint_why}")
