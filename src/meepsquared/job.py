@@ -473,6 +473,8 @@ class Result:
     from; checkpoint is the latest checkpoint in the output folder, None when
     it holds none. evaluations: each evaluation of the training, a resumed
     one's earlier sessions' too, as {"step": ..., "eval_loss": ...}.
+    milestones: the record of each milestone made, earlier sessions' too:
+    its step, folder, seconds and, with an evaluation, its scores by group.
     """
 
     steps: int
@@ -483,6 +485,7 @@ class Result:
     paused: bool = False
     checkpoint: Optional[str] = None
     evaluations: list = field(default_factory=list)
+    milestones: list = field(default_factory=list)
     _model: Any = field(default=None, repr=False, compare=False)
     _tokenizer: Any = field(default=None, repr=False, compare=False)
 
@@ -495,7 +498,7 @@ class Result:
     def to_dict(self) -> dict:
         return {"steps": self.steps, "seconds": self.seconds, "final_loss": self.final_loss,
                 "peak_memory_bytes": self.peak_memory_bytes, "output": self.output, "paused": self.paused,
-                "checkpoint": self.checkpoint, "evaluations": self.evaluations}
+                "checkpoint": self.checkpoint, "evaluations": self.evaluations, "milestones": self.milestones}
 
 
 def load_yaml(text: str):
@@ -515,34 +518,35 @@ def load_yaml(text: str):
     return yaml.load(text, Loader=Loader)  # noqa: S506 (a SafeLoader)
 
 
-def load_reward(spec):
-    """A reward function: a callable as it is, or "module:function" / "path/to/file.py:function" imported."""
+def load_reward(spec, field: str = "rewards"):
+    """A function given by a field (a reward, the milestone scorer): a callable as it is, or "module:function" /
+    "path/to/file.py:function" imported."""
     if callable(spec):
         return spec
     if not isinstance(spec, str) or ":" not in spec:
-        raise ValueError(f"rewards: {spec!r} is neither a function nor 'module:function' or 'file.py:function'")
+        raise ValueError(f"{field}: {spec!r} is neither a function nor 'module:function' or 'file.py:function'")
     where, _, name = spec.rpartition(":")
     if where.endswith(".py"):
         path = Path(where)
         if not path.is_file():
-            raise FileNotFoundError(f"rewards: {spec!r}: no file {path}")
+            raise FileNotFoundError(f"{field}: {spec!r}: no file {path}")
         module_spec = importlib.util.spec_from_file_location(path.stem, path)
         module = importlib.util.module_from_spec(module_spec)
         module_spec.loader.exec_module(module)
     else:
         module = importlib.import_module(where)
     if not hasattr(module, name):
-        raise AttributeError(f"rewards: {spec!r}: {where} has no {name!r}")
+        raise AttributeError(f"{field}: {spec!r}: {where} has no {name!r}")
     return getattr(module, name)
 
 
-def reward_name(reward) -> str:
-    """A reward function as data: 'module:function'; refused for one that cannot be imported by name."""
+def reward_name(reward, field: str = "rewards") -> str:
+    """A function of a field as data: 'module:function'; refused for one that cannot be imported by name."""
     if isinstance(reward, str):
         return reward
     module, name = getattr(reward, "__module__", None), getattr(reward, "__qualname__", "")
     if not module or module == "__main__" or "<" in name or "." in name:
-        raise ValueError(f"rewards: {reward!r} cannot be written as data; give it as 'module:function' "
+        raise ValueError(f"{field}: {reward!r} cannot be written as data; give it as 'module:function' "
                          "or 'file.py:function'")
     return f"{module}:{name}"
 
@@ -555,6 +559,10 @@ class _Prepared:
     plan: Plan
     output: str
     trained: bool = False
+    # The milestones' steps, the rows their evaluation answers and its scorer (meepsquared._milestones)
+    milestones: Optional[list] = None
+    milestone_rows: Optional[list] = None
+    milestone_scorer: Any = None
 
 
 @dataclass
@@ -601,6 +609,15 @@ class TrainingJob:
     timed_steps: the optimizer steps the plan times for its time per step
         (TIMED_STEPS on a GPU; 0: none). Set by hand, they are timed on the
         CPU too.
+    milestones: the share of the planned steps between milestones (above 0,
+        at most 1): at each, and at the last step, the adapter is saved apart
+        in <output>/milestones/step-<N>. milestone_eval: rows the model answers
+        at each milestone, a .jsonl file, a list of mappings or a
+        datasets.Dataset, each {"messages": [...], "reference": "...", and
+        optionally "group" and "source"}; milestone_scorer scores the answers
+        of each group, a function (hypotheses, references) -> {metric: number}
+        or its name as 'module:function' or 'file.py:function'. SFT only, on
+        one process. See meepsquared._milestones.
     recipe, overrides: see Recipe and Overrides.
     """
 
@@ -619,6 +636,9 @@ class TrainingJob:
     eval_share: Optional[float] = None
     eval_every: Optional[int] = None
     timed_steps: Optional[int] = None
+    milestones: Optional[float] = None
+    milestone_eval: Any = None
+    milestone_scorer: Any = None
     tokenizer: Any = None
     recipe: Recipe = field(default_factory=Recipe)
     overrides: Overrides = field(default_factory=Overrides)
@@ -679,6 +699,17 @@ class TrainingJob:
         if self.task != "sft" and self.recipe.tokens_per_update is not None:
             raise ValueError("recipe.tokens_per_update is an SFT setting; GRPO's batch counts completions, "
                              "recipe.effective_batch")
+        if self.milestones is not None and (isinstance(self.milestones, bool)
+                                            or not isinstance(self.milestones, (int, float))
+                                            or not 0 < self.milestones <= 1):
+            raise ValueError(f"milestones must be the share of the planned steps between milestones, above 0 and at "
+                             f"most 1, not {self.milestones!r}")
+        if self.milestone_eval is not None and self.milestones is None:
+            raise ValueError("milestone_eval: no milestones; give milestones, the share of the steps between them")
+        if (self.milestone_eval is None) != (self.milestone_scorer is None):
+            raise ValueError("milestone_eval and milestone_scorer go together: the rows to answer and what scores them")
+        if self.milestones is not None and self.task != "sft":
+            raise ValueError("milestones are an SFT setting")
         if self.report_to is not None and not (
                 isinstance(self.report_to, str)
                 or (isinstance(self.report_to, (list, tuple)) and all(isinstance(r, str) for r in self.report_to))):
@@ -704,6 +735,8 @@ class TrainingJob:
             raise ValueError("tokenizer is a loaded tokenizer, which cannot be written as data")
         if self.eval_data is not None and not isinstance(self.eval_data, (str, os.PathLike)):
             raise ValueError("eval_data is a loaded dataset; only a dataset id or a file can be written as data")
+        if self.milestone_eval is not None and not isinstance(self.milestone_eval, (str, os.PathLike)):
+            raise ValueError("milestone_eval is loaded rows; only a .jsonl file can be written as data")
         out = {"model": self.model, "data": str(self.data) if self.data is not None else None, "task": self.task,
                "method": self.method, "steps": self.steps, "epochs": self.epochs,
                "rewards": [reward_name(r) for r in self.rewards] if self.rewards else None,
@@ -711,7 +744,11 @@ class TrainingJob:
                "report_to": list(self.report_to) if isinstance(self.report_to, tuple) else self.report_to,
                "eval_data": str(self.eval_data) if self.eval_data is not None else None,
                "eval_split": self.eval_split, "eval_share": self.eval_share, "eval_every": self.eval_every,
-               "timed_steps": self.timed_steps, "recipe": self.recipe.to_dict() or None,
+               "timed_steps": self.timed_steps, "milestones": self.milestones,
+               "milestone_eval": str(self.milestone_eval) if self.milestone_eval is not None else None,
+               "milestone_scorer": (reward_name(self.milestone_scorer, "milestone_scorer")
+                                    if self.milestone_scorer is not None else None),
+               "recipe": self.recipe.to_dict() or None,
                "overrides": self.overrides.to_dict() or None}
         return {key: value for key, value in out.items() if value is not None}
 
@@ -770,7 +807,7 @@ class TrainingJob:
     def _train(self, resume: bool, stop, status) -> Result:
         import torch
 
-        from meepsquared import _batches, _sessions
+        from meepsquared import _batches, _milestones, _sessions
 
         prepared = self._prepare()
         if prepared.trained:
@@ -788,10 +825,18 @@ class TrainingJob:
             _sessions.record_plan(output, prepared.plan)
         if stop is not None:
             trainer.add_callback(stop)
+        report = None
         if status is not None:
-            trainer.add_callback(_sessions.Report(status))
+            report = _sessions.Report(status)
+            trainer.add_callback(report)
             status.update(state="training", plan=prepared.plan.to_dict(), step=step,
                           total_steps=prepared.plan["length"].value)
+        milestones = None
+        if prepared.milestones is not None:
+            # After Report: the time of a milestone is taken out of the steps'
+            milestones = _milestones.Milestones(trainer, output, prepared.milestones, prepared.milestone_rows,
+                                                prepared.milestone_scorer, status=status, report=report)
+            trainer.add_callback(milestones)
         if os.environ.get("MEEPSQUARED_QUIET") != "1":
             print(prepared.plan, flush=True)
         device = next(prepared.model.parameters()).device
@@ -813,6 +858,7 @@ class TrainingJob:
         return Result(steps=state.global_step, seconds=seconds, final_loss=losses[-1] if losses else None,
                       peak_memory_bytes=torch.cuda.max_memory_allocated(device) if on_gpu else None,
                       output=output, paused=paused, checkpoint=latest, evaluations=evaluations,
+                      milestones=milestones.records() if milestones is not None else [],
                       _model=prepared.model,
                       _tokenizer=prepared.tokenizer)
 
@@ -1212,8 +1258,8 @@ class TrainingJob:
 
         from trl import GRPOConfig, SFTConfig
 
-        from meepsquared import (_allocator, _batches, _checkpointing, _compile, _data_checks, _moe, _selective,
-                            _sessions, chat_templates)
+        from meepsquared import (_allocator, _batches, _checkpointing, _compile, _data_checks, _milestones, _moe,
+                            _selective, _sessions, chat_templates)
         from meepsquared.models import DEFAULT_TARGETS, MeepLanguageModel, _fused_wanted, keeps_examples_apart
 
         recipe, overrides = self.recipe, self.overrides
@@ -1776,12 +1822,44 @@ class TrainingJob:
                 time_why += (f"; each evaluation {eval_batches} forward passes, priced the same way from timed "
                              f"forward passes of its largest batch, {eval_largest.text()}, and its median one, "
                              f"{eval_median.text()}, at its mean batch, {eval_mean:,.0f} tokens")
+        # The milestones: their steps, their rows checked against the chat template now rather than at the first
+        # milestone, and the time their generation takes, from one batch timed
+        milestone_at = milestone_rows = milestone_scorer = None
+        milestone_seconds = 0.0
+        if self.milestones is not None:
+            if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+                raise ValueError("milestones run on one process, and this training runs on several")
+            milestone_at = _milestones.steps(planned, self.milestones)
+            each = None
+            what = f"the adapter saved apart in {output}/{_milestones.FOLDER}/step-<N>"
+            why = f"every {self.milestones:g} of the {planned} planned steps, and the last"
+            if self.milestone_eval is not None:
+                milestone_rows = _milestones.rows(self.milestone_eval)
+                for row in milestone_rows:
+                    _milestones.prompt(tokenizer, row)
+                milestone_scorer = load_reward(self.milestone_scorer, "milestone_scorer")
+                groups = sorted({row.get("group") or _milestones.GROUP for row in milestone_rows})
+                what += f", and {len(milestone_rows):,} rows answered and scored ({', '.join(groups)})"
+                if seconds_per_step is not None:
+                    each, generation_why = _milestones.time_generation(peft_model, tokenizer, milestone_rows)
+                    milestone_seconds = each * len(milestone_at)
+                    estimated += milestone_seconds
+                    what += f"; each about {_sessions.duration_text(each)} of generation"
+                    why += f"; the generation: {generation_why}; the scorer's time is not counted"
+            decisions.append(Decision("milestones", "milestones",
+                                      {"steps": milestone_at, "generation_seconds": each},
+                                      f"{len(milestone_at)} at steps {_steps_text(milestone_at)}: {what}", why))
+        else:
+            decisions.append(Decision("milestones", "milestones", None, "none", "no milestones given"))
         duration = "not timed"
         if seconds_per_step is not None:
             duration = (f"about {seconds_per_step:.3g} s per step, {_sessions.duration_text(estimated)} for "
                         f"{planned} steps")
             if evaluations:
                 duration += f" with {evaluations} evaluations ({_sessions.duration_text(eval_seconds)} of it)"
+            if milestone_seconds:
+                duration += (f" and {len(milestone_at)} milestones ({_sessions.duration_text(milestone_seconds)} "
+                             "of it)")
         decisions.append(Decision("duration", "time", seconds_per_step, duration, time_why))
 
         # The memory, measured over the timed steps and the evaluation pass
@@ -1808,7 +1886,8 @@ class TrainingJob:
                     task=self.task, method=self.method, device=device_name, free_bytes=free_bytes,
                     decisions=_ordered(decisions), seconds_per_step=seconds_per_step, estimated_seconds=estimated,
                     peak_gpu_bytes=peak_gpu, peak_host_bytes=peak_host, memory_request_bytes=request)
-        self._prepared = _Prepared(peft_model, tokenizer, trainer, plan, output)
+        self._prepared = _Prepared(peft_model, tokenizer, trainer, plan, output, milestones=milestone_at,
+                                   milestone_rows=milestone_rows, milestone_scorer=milestone_scorer)
         return self._prepared
 
 
@@ -1818,11 +1897,17 @@ ORDER = ["loading", "allocator_cap", "weights", "attention", "padding_free", "li
          "micro_batch",
          "accumulation", "order", "rank",
          "alpha", "dropout", "targets", "experts", "optimizer", "learning_rate", "schedule", "warmup_steps",
-         "max_grad_norm", "weight_decay", "length", "duration", "memory", "evaluation", "data_checks",
+         "max_grad_norm", "weight_decay", "length", "duration", "memory", "evaluation", "milestones", "data_checks",
          "source_weights", "max_length", "answers_only",
          "generations",
          "max_completion_length", "temperature", "top_p", "top_k", "chat_template_kwargs", "data", "report_to",
          "output"]
+
+
+def _steps_text(steps: list) -> str:
+    """Steps as a short list: all of them up to six, else the first three, an ellipsis and the last."""
+    shown = steps if len(steps) <= 6 else steps[:3] + ["..."] + steps[-1:]
+    return ", ".join(f"{s:,}" if isinstance(s, int) else s for s in shown)
 
 
 def _ordered(decisions: list) -> list:

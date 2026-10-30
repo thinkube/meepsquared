@@ -47,6 +47,9 @@ result.save("out")    # the adapter; result.save("out", merged=True) for a 16-bi
 | `eval_split` | `"test"` for a dataset id | The split of `eval_data`. Required for a `DatasetDict`; refused for a file or a `datasets.Dataset`, which have no splits.
 | `eval_share` | none | SFT only: instead of `eval_data`, the share of the training data held out for evaluation, above 0 and at most 0.5. Not with `eval_data`.
 | `eval_every` | about 10 evaluations | The optimizer steps between evaluations.
+| `milestones` | none | SFT only: the share of the planned steps between milestones, above 0 and at most 1. See <<_milestones>>.
+| `milestone_eval` | none | The rows the model answers at each milestone: a `.jsonl` file, a list of mappings or a `datasets.Dataset`. Needs `milestones` and `milestone_scorer`.
+| `milestone_scorer` | none | What scores the answers of each group: a function `(hypotheses, references) -> {metric: number}`, or `module:function` or `file.py:function`.
 | `timed_steps` | 3 on a GPU | The optimizer steps the plan times to state the training's length; `0` times none. See <<_the_length_of_the_training>>.
 | `recipe` | auto | The training choices, see <<_the_recipe>>.
 | `overrides` | auto | The hardware choices, see <<_overrides>>.
@@ -122,6 +125,27 @@ The plan's `evaluation` line says the data, its rows and every how many steps it
 ----
 
 The trainer logs each evaluation as `eval_loss`, so with `report_to="mlflow"` MLflow records it. The result's `evaluations` lists them, and the status file holds the latest (`eval_loss`, `eval_step`). A resumed training evaluates the same rows (the share is held out the same way), and its evaluations continue those of its earlier sessions.
+
+== Milestones
+
+A milestone keeps the model as it is at a point of the training, apart from the checkpoints, and can score what it writes. `milestones: 0.02` makes one every 2% of the planned steps, and one at the last step.
+
+[source,yaml]
+----
+milestones: 0.02
+milestone_eval: flores-dev.jsonl
+milestone_scorer: scorer.py:score
+----
+
+Each milestone is a folder, `<output>/milestones/step-<N>`: the adapter in PEFT's format (`adapter_config.json`, `adapter_model.safetensors`) and the tokenizer. A checkpoint rotation never removes it. With an evaluation, it also holds each answer (`generations.jsonl`) and the scores. `milestone.json` is written last, with the step, the seconds it took and the scores; a folder without it is unfinished, and is made again. The folder is written as `step-<N>.partial` and renamed when whole.
+
+The evaluation:: Each row of `milestone_eval` is `{"messages": [...], "reference": "..."}`, with an optional `"group"` and `"source"`. The messages are the conversation up to the answer; the reference is the expected answer. The prompt is the chat template's rendering of the messages followed by an answer holding the reference, cut where the reference begins: exactly what the training reads before an answer, a thinking block the template writes included.
+The answers:: The model writes greedily, in left-padded batches of rows of similar length. Each answer ends at the end token, at its length cap, and at its first loop: the last tokens repeated 4 or more times in a row, a block of 1 to 32 tokens, at least 16 tokens in all; one copy is kept. The cap is 2 × the tokens of `source`, or of the last user message when there is no `source`, + 32. For translation, `source` is the sentence alone, without the instruction around it.
+The scores:: `milestone_scorer` scores each group apart, `all` when the rows have no group, and answers a mapping of metric names to numbers. The trainer logs them as `milestone/<group>/<metric>`, so with `report_to="mlflow"` MLflow records them at the milestone's step. The result's `milestones` and the status file list every milestone.
+Stopping:: A milestone runs at the end of its optimizer step, before a stop asked for at that step takes effect: a stop never cuts one in half. A resumed training does not make a finished milestone again.
+The plan:: The `milestones` line gives the steps. On a GPU, the plan generates the batch with the most decoding steps, a reference's tokens standing for the answer's, and prices every batch from it. The `time` line counts that generation for each milestone; the scorer's time is not counted.
+
+Milestones run on one process.
 
 == Data checks
 
@@ -421,6 +445,7 @@ The status file:: `--status-file` writes the training's state as JSON: at the st
 | `seconds_per_step`, `eta_seconds` | This session's mean time per step after its first, and the time left at that pace; `null` until the second step. Neither counts the evaluations' time. The plan holds the timed estimate, which counts them.
 | `eval_loss`, `eval_step` | The latest evaluation's loss and step, a resumed training's earlier sessions' too; `null` before the first or without evaluation.
 | `checkpoint` | The latest checkpoint saved, or found at the end; `null` when there is none.
+| `milestones`, `milestone_seconds`, `next_milestone` | With `milestones`: each finished milestone's record (its step, folder, seconds and scores), earlier sessions' too; the seconds the latest took; the step of the next one, `null` after the last.
 | `plan` | `plan.to_dict()`; `null` while planning.
 | `error` | Why the training failed; `null` otherwise.
 | `updated` | When the file was written, in ISO 8601, UTC.
