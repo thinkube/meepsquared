@@ -14,7 +14,7 @@ from typing import Any, Optional
 import torch
 
 from meepsquared import (_banner, _checkpointing, _compile, _fp8, _fused, _linear_attention, _liger, _moe, _save,
-                    _selective, _split, _unified_memory, _varlen)
+                    _selective, _shared_vllm, _split, _unified_memory, _varlen)
 
 DEFAULT_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 ATTENTION_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj"]
@@ -254,6 +254,7 @@ class MeepLanguageModel:
         trust_remote_code: bool = False,
         fast_inference: bool = False,
         quant_storage: Optional[torch.dtype] = None,
+        shared_vllm: Optional[dict] = None,
         **kwargs,
     ):
         """The model and its tokenizer, ready for get_peft_model.
@@ -270,6 +271,11 @@ class MeepLanguageModel:
             the FP8 tensor cores (see meepsquared._fp8), inside the fused LoRA
             kernels too; half their memory, and about 1.6 times faster products
             on a GPU of compute capability 8.9 or later. Not with load_in_4bit.
+        shared_vllm: vLLM in this process, holding the model's routed expert
+            stacks once for both (see meepsquared._shared_vllm): the settings of
+            its engine, {"max_lora_rank", "kv_cache_bytes", "max_model_len"}.
+            The model then has the engine in model._meepsquared["engine"].
+            Not with load_in_4bit; on one GPU.
         quant_storage: the dtype bitsandbytes packs the 4-bit weights in; under
             FSDP2 the model's dtype (torch.bfloat16), so that a layer's weights
             share one dtype to be sharded.
@@ -323,6 +329,14 @@ class MeepLanguageModel:
         # Capped before the weights come: the first allocation to overflow must be this process's error
         allocator_cap = _unified_memory.cap_allocator(gpu_index) if shared else None
         loading = _unified_memory.shards_to_gpu(f"cuda:{gpu_index}") if shared else contextlib.nullcontext()
+        if shared_vllm is not None:
+            if load_in_4bit:
+                raise ValueError("shared_vllm: vLLM shares 16-bit or FP8 expert stacks, not 4-bit ones")
+            if gpu_index is None:
+                raise ValueError("shared_vllm: the model must be on one GPU")
+            _shared_vllm.check_architecture(model_name)
+            # The expert stacks are not read: vLLM's take their place once it has loaded
+            loading = _shared_vllm.trainer_without_stacks(f"cuda:{gpu_index}")
         model_config = AutoConfig.from_pretrained(model_name, **hub)
         attention_auto, attention_why = choose_attention(model_config)
         if attn_implementation is None:
@@ -346,6 +360,13 @@ class MeepLanguageModel:
                          "split": _split.apply(model), "fp8": load_in_fp8,
                          "attention_auto": (attention_auto, attention_why)}
         model._meepsquared["allocator_cap"] = allocator_cap
+        if shared_vllm is not None:
+            # Last: once vLLM is imported, Transformers' configuration classes are vLLM's
+            engine = _shared_vllm.Engine(model_name, dtype, load_in_fp8, device=torch.device(f"cuda:{gpu_index}"),
+                                         **shared_vllm)
+            engine.attach(model)
+            _shared_vllm.log(engine.memory, "started")
+            model._meepsquared["engine"] = engine
         dtype_name = str(dtype).removeprefix("torch.")
         _banner.show(model_type=model.config.model_type, liger=liger, padding_free=padding_free,
                      padding_free_reason=refusal,

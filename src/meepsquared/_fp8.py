@@ -173,6 +173,10 @@ def convert_stacks(experts) -> int:
     for name, parameter in list(experts.named_parameters(recurse=False)):
         if parameter.dim() != 3 or parameter.requires_grad or not parameter.is_floating_point():
             continue
+        if parameter.dtype == torch.float8_e4m3fn and hasattr(experts, name + STACK_SCALE):
+            # FP8 already, with its scale: the stacks a shared vLLM holds (meepsquared._shared_vllm)
+            converted += 1
+            continue
         weight8, scale = quantize_stack(parameter.detach())
         setattr(experts, name, nn.Parameter(weight8, requires_grad=False))
         experts.register_buffer(name + STACK_SCALE, scale)

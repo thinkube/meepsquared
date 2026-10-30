@@ -213,24 +213,33 @@ def _generate_batch(model, tokenizer, batch: list, ends: set) -> list:
 
 
 class _Inference:
-    """The model in evaluation mode with its cache on; put back as it was on exit."""
+    """The model in evaluation mode with its cache on, and a mixture of experts' router logits off (their balancing
+    loss is for training, and generation's masks do not fit it); put back as it was on exit."""
 
     def __init__(self, model):
         self.model = model
 
+    def _configs(self):
+        config = getattr(self.model, "config", None)
+        return [c for c in (config, getattr(config, "text_config", None)) if c is not None]
+
     def __enter__(self):
         self.training = self.model.training
-        config = getattr(self.model, "config", None)
-        self.cache = getattr(config, "use_cache", None)
+        self.saved = [(c, getattr(c, "use_cache", None), getattr(c, "output_router_logits", None))
+                      for c in self._configs()]
         self.model.eval()
-        if config is not None:
-            config.use_cache = True
+        for c in self._configs():
+            c.use_cache = True
+            if getattr(c, "output_router_logits", None) is not None:
+                c.output_router_logits = False
         return self.model
 
     def __exit__(self, *exc):
-        config = getattr(self.model, "config", None)
-        if config is not None and self.cache is not None:
-            config.use_cache = self.cache
+        for c, cache, router in self.saved:
+            if cache is not None:
+                c.use_cache = cache
+            if router is not None:
+                c.output_router_logits = router
         self.model.train(self.training)
         return False
 
@@ -244,6 +253,20 @@ def generate(model, tokenizer, found: list, size: int = BATCH) -> list:
             for (i, _, _), ids in zip(batch, _generate_batch(model, tokenizer, batch, ends)):
                 answers[i] = " ".join(tokenizer.decode(ids, skip_special_tokens=True).split())
     return answers
+
+
+def engine_answers(engine, model, tokenizer, found: list, adapter_dir) -> list:
+    """The answers of a shared vLLM (meepsquared._shared_vllm) with the adapter saved at `adapter_dir`, from the same
+    prompts and caps as generate's, and cut as generate's answers are cut."""
+    from meepsquared import _shared_vllm
+
+    prompts = [tokenizer(prompt(tokenizer, row), add_special_tokens=False)["input_ids"] for row in found]
+    caps = [budget(tokenizer, row) for row in found]
+    ends = end_ids(model, tokenizer)
+    with _shared_vllm.checkpoint_named(model, adapter_dir) as named:
+        generated = engine.generate(prompts, caps, ends, named)
+    return [" ".join(tokenizer.decode(cut(ids, cap, ends), skip_special_tokens=True).split())
+            for ids, cap in zip(generated, caps)]
 
 
 def time_generation(model, tokenizer, found: list, size: int = BATCH) -> tuple:
@@ -296,11 +319,14 @@ class Milestones(TrainerCallback):
     scored and logged. A milestone finished in an earlier session is not made again."""
 
     def __init__(self, trainer, output, at: list, found: Optional[list], scorer: Optional[Callable],
-                 size: int = BATCH, status=None, report=None):
+                 size: int = BATCH, status=None, report=None, engine=None):
         self.trainer, self.output, self.at = trainer, Path(output), set(at)
         self.found, self.scorer, self.size = found, scorer, size
         self.status, self.report = status, report
         self.seconds = None
+        # A shared vLLM answers instead of model.generate; its stacks' checksum at the start, checked once
+        self.engine = engine
+        self.checksum = engine.checksum() if engine is not None else None
 
     def records(self) -> list:
         return [record for record in (done(self.output, step) for step in sorted(self.at)) if record is not None]
@@ -329,8 +355,27 @@ class Milestones(TrainerCallback):
         # meepsquared's adapter save reads the adapter's parameters alone, never the frozen expert stacks
         _save.save(model, partial, tokenizer=tokenizer, save_method="lora")
         record = {"step": step, "planned_steps": state.max_steps, "folder": str(final)}
-        if self.found is not None:
+        if self.found is not None and self.engine is not None:
+            import torch
+
+            from meepsquared import _shared_vllm
+
+            device = next(model.parameters()).device
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats(device)
+            self.engine.check_shared(model)
+            answers = engine_answers(self.engine, model, tokenizer, self.found, partial)
+            record["peak_memory_bytes"] = torch.cuda.max_memory_allocated(device)
+            _shared_vllm.log({"peak": record["peak_memory_bytes"]}, f"milestone at step {step}")
+            if self.checksum is not None:
+                now = self.engine.checksum()
+                if now != self.checksum:
+                    raise _shared_vllm.SharedError(f"the shared expert stacks changed during training: their sum was "
+                                                   f"{self.checksum!r} at the start and is {now!r}")
+                self.checksum = None
+        elif self.found is not None:
             answers = generate(model, tokenizer, self.found, self.size)
+        if self.found is not None:
             with (partial / "generations.jsonl").open("w") as f:
                 for row, answer in zip(self.found, answers):
                     f.write(json.dumps({"group": row.get("group") or GROUP, "reference": row["reference"],
