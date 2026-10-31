@@ -71,15 +71,33 @@ def text_hash(text: str) -> str:
     return hashlib.blake2b(text.encode(), digest_size=32).hexdigest()
 
 
+def table_hash(dataset) -> str:
+    """A hash of a datasets.Dataset's rows, as Arrow writes them. Its fingerprint will not do: datasets draws a
+    random one for data made in memory, so the same rows would make another key in each process."""
+    import pyarrow as pa
+
+    digest = hashlib.blake2b(digest_size=32)
+
+    class Sink:
+        def write(self, data):
+            digest.update(data)
+            return len(data)
+
+    table = dataset.with_format("arrow")[:]
+    with pa.ipc.new_stream(pa.PythonFile(Sink(), mode="w"), table.schema) as writer:
+        writer.write_table(table)
+    return digest.hexdigest()
+
+
 def data_identity(data, split: Optional[str], loaded) -> dict:
-    """What identifies the data: a file by its bytes, a loaded datasets.Dataset by its fingerprint, a dataset id by
-    the fingerprint of its split as loaded."""
+    """What identifies the data: a file by its bytes, a dataset id by the fingerprint of its split as loaded (made
+    from its files), a loaded datasets.Dataset by its rows."""
     if isinstance(data, (str, os.PathLike)) and Path(data).exists():
         path = Path(data)
         return {"file": str(path), "bytes": path.stat().st_size, "hash": file_hash(path)}
     if isinstance(data, (str, os.PathLike)):
         return {"id": str(data), "split": split, "fingerprint": loaded._fingerprint}
-    return {"fingerprint": loaded._fingerprint}
+    return {"rows": len(loaded), "hash": table_hash(loaded)}
 
 
 def tokenizer_identity(tokenizer) -> dict:

@@ -87,8 +87,13 @@ def test_the_key_is_the_inputs_hashed(tokenizer, tmp_path):
     assert set(first) == {"file", "bytes", "hash"}
     data.write_text('{"text": "the sloth"}\n')
     assert _preprocess.data_identity(str(data), None, None)["hash"] != first["hash"]
-    # A loaded dataset by its fingerprint; the tokenizer by its vocabulary, template and special tokens
-    assert _preprocess.data_identity(TEXT8, None, TEXT8) == {"fingerprint": TEXT8._fingerprint}
+    # A loaded dataset by its rows: the same rows made again are the same, other rows are not
+    again = Dataset.from_dict({"text": list(TEXT8["text"])})
+    assert _preprocess.data_identity(TEXT8, None, TEXT8) == _preprocess.data_identity(again, None, again)
+    assert _preprocess.data_identity(TEXT8, None, TEXT8)["rows"] == 8
+    other = Dataset.from_dict({"text": list(TEXT8["text"])[:7] + ["the hare"]})
+    assert _preprocess.data_identity(other, None, other) != _preprocess.data_identity(TEXT8, None, TEXT8)
+    # The tokenizer by its vocabulary, template and special tokens
     identity = _preprocess.tokenizer_identity(tokenizer)
     assert set(identity) == {"class", "vocabulary", "chat_template", "special_tokens"}
     assert identity["chat_template"] is None and identity["special_tokens"]["pad_token"] == "<pad>"
