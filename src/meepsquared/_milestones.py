@@ -354,6 +354,8 @@ class Milestones(TrainerCallback):
         shutil.rmtree(partial, ignore_errors=True)
         # meepsquared's adapter save reads the adapter's parameters alone, never the frozen expert stacks
         _save.save(model, partial, tokenizer=tokenizer, save_method="lora")
+        # The seconds of each part: the save, the generation, the scoring
+        parts = {"saving": round(time.perf_counter() - began, 1)}
         record = {"step": step, "planned_steps": state.max_steps, "folder": str(final)}
         if self.found is not None and self.engine is not None:
             import torch
@@ -376,13 +378,16 @@ class Milestones(TrainerCallback):
         elif self.found is not None:
             answers = generate(model, tokenizer, self.found, self.size)
         if self.found is not None:
+            parts["generation"] = round(time.perf_counter() - began - parts["saving"], 1)
             with (partial / "generations.jsonl").open("w") as f:
                 for row, answer in zip(self.found, answers):
                     f.write(json.dumps({"group": row.get("group") or GROUP, "reference": row["reference"],
                                         "answer": answer}, ensure_ascii=False) + "\n")
             record["scores"] = score(self.scorer, self.found, answers)
             record["rows"] = len(self.found)
+            parts["scoring"] = round(time.perf_counter() - began - parts["saving"] - parts["generation"], 1)
         record["seconds"] = round(time.perf_counter() - began, 1)
+        record["seconds_of"] = parts
         (partial / "milestone.json").write_text(json.dumps(record, indent=2))
         shutil.rmtree(final, ignore_errors=True)
         partial.rename(final)

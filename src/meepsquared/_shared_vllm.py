@@ -501,11 +501,11 @@ def compare(trainer: list, vllm: list) -> dict:
     return {"top_same": top_same, "ties": ties, "top_diff": top_diff, "tail_diff": tail}
 
 
-# The check's bound on the difference of the top token's log-probability between the trainer and vLLM: at most 0.16
-# measured on Qwen3.6-35B-A3B in BF16, with the adapter's B zero and with meepsquared's training kernels; and the
-# spread of the random adapter's A and B, which must move the trainer's log-probabilities by more than twice the
-# bound for the check to test the adapter
-TOP_BOUND = 0.3
+# The check's bound on the difference of the top token's log-probability between the trainer and vLLM: measured
+# on Qwen3.6-35B-A3B with the adapter's B zero at 0.16 (BF16) and 0.24 to 0.40 (FP8, from run to run: vLLM's batch
+# composes differently and a token's experts can change); and the spread of the random adapter's A and B, which
+# must move the trainer's log-probabilities by more than twice the bound for the check to test the adapter
+TOP_BOUND = 0.5
 # With the random adapter, which moves the output by about 5, the two sides' rounding grows with it: at most this
 # share of its effect (0.30 with an effect of 5.29, 5.7%, measured); a wrong layout errs by about the effect itself
 RANDOM_SHARE = 0.1
