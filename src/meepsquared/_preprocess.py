@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -269,8 +270,8 @@ def rows_text(named_rows: dict) -> str:
 class Building:
     """One preprocessing being built: its passes, in order, over the training data and the evaluation data."""
 
-    def __init__(self, folder: Path, tokenizer, answer_args: dict, markers, max_length: int, cores: int):
-        self.folder, self.tokenizer = folder, tokenizer
+    def __init__(self, folder: Path, tokenizer, answer_args: dict, markers, max_length: int, cores: int, say=print):
+        self.folder, self.tokenizer, self.say = folder, tokenizer, say
         self.answer_args, self.max_length, self.cores = answer_args, max_length, cores
         # meepsquared's turn markers as token ids, as its collator reads them (see meepsquared.chat_templates)
         plain = getattr(tokenizer, "tokenizer", tokenizer)
@@ -293,9 +294,12 @@ class Building:
         try:
             return tokenized(dataset, self.tokenizer, args, where_), named(dataset, [])
         except Exception as error:  # noqa: BLE001 (TRL tokenizes a set at once: each row is rendered alone)
+            self.say(f"TRL's tokenization of {where_} raised {type(error).__name__}: {error}; each row is rendered "
+                     "alone to name the ones that fail")
             rendered = _map(dataset, _data_checks.render_failures, self.folder, f"{where_}: rendering", self.cores,
                             fn_kwargs={"tokenizer": self.tokenizer,
-                                       "assistant_masks": bool(self.answer_args.get("assistant_only_loss"))})
+                                       "assistant_masks": bool(self.answer_args.get("assistant_only_loss")),
+                                       "chat_template": _Tokenizing(self.tokenizer, args, dataset[0]).chat_template})
             failed = where(rendered, FAILURE, "")
             failed = [i for i in range(len(rendered)) if i not in set(failed)]
             if failed:
@@ -374,8 +378,11 @@ def _preprocess_here(job, cache_dir, cores: Optional[int], say, wait: bool = Fal
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     tokenizer = job.tokenizer if job.tokenizer is not None else load_tokenizer(job.model)
-    building = cache_dir / f"building-{os.getpid()}"
-    shutil.rmtree(building, ignore_errors=True)
+    # Built on the machine's own disk (TMPDIR, else /tmp): its passes write gigabytes from every core at once, which
+    # a network volume such as the cluster's shared models volume serves slowly enough to stall them. The result
+    # alone is then copied beside the cache's other folders, and renamed into place there.
+    building = Path(tempfile.mkdtemp(prefix="meepsquared-preprocess-"))
+    copying = cache_dir / f".copying-{os.getpid()}"
     (building / CACHE_FOLDER).mkdir(parents=True)
     try:
         dataset, source = job._dataset(cache_dir=str(building / CACHE_FOLDER))
@@ -405,15 +412,17 @@ def _preprocess_here(job, cache_dir, cores: Optional[int], say, wait: bool = Fal
             say(f"preprocessed data found in {target}: {report['decision']['text']}")
             return Outcome(str(target), key, True, report)
         say(f"preprocessing {len(dataset):,} rows of {source} on {cores} core{'s' if cores != 1 else ''} into {target}")
-        build = Building(building, tokenizer, answer_args, markers, max_length, cores)
+        build = Building(building, tokenizer, answer_args, markers, max_length, cores, say)
         report = _build(job, build, dataset, eval_dataset, source, eval_source, kind, columns, answer_args)
         with open(building / REPORT_FILE, "w") as f:
             json.dump(report, f, indent=2)
         shutil.rmtree(building / CACHE_FOLDER)
         with open(building / KEY_FILE, "w") as f:
             json.dump(key_inputs, f, indent=2, sort_keys=True)
+        shutil.rmtree(copying, ignore_errors=True)
+        shutil.copytree(building, copying)
         try:
-            building.rename(target)
+            copying.rename(target)
         except OSError:
             if not found(target, key_inputs):
                 raise
@@ -423,6 +432,7 @@ def _preprocess_here(job, cache_dir, cores: Optional[int], say, wait: bool = Fal
         return Outcome(str(target), key, False, report)
     finally:
         shutil.rmtree(building, ignore_errors=True)
+        shutil.rmtree(copying, ignore_errors=True)
 
 
 def _build(job, build: Building, dataset, eval_dataset, source: str, eval_source: Optional[str], kind: str,
@@ -510,9 +520,9 @@ def _build(job, build: Building, dataset, eval_dataset, source: str, eval_source
                                                        "; Recipe(max_cut_share=...) refuses more than a share")
               + "; a row of no answer token trains nothing" + "".join(f"; {part}" for part in named_parts))
     train = build.cut(train, "data")
-    _save(train, build.folder / TRAIN_FOLDER, build.cores)
+    _save(train, build.folder / TRAIN_FOLDER)
     if eval_prepared is not None:
-        _save(build.cut(eval_prepared, "eval_data"), build.folder / EVAL_FOLDER, build.cores)
+        _save(build.cut(eval_prepared, "eval_data"), build.folder / EVAL_FOLDER)
     return {"decision": {"name": "data_checks", "label": "data checks", "value": value, "text": text,
                          "reason": reason},
             "kind": kind, "columns": columns, "rows": facts["rows"], "trained_rows": len(train),
@@ -520,16 +530,16 @@ def _build(job, build: Building, dataset, eval_dataset, source: str, eval_source
             "has_kinds": has_kinds, "seed": SEED, "source": source, "eval_source": eval_source}
 
 
-def _save(dataset, folder: Path, cores: int) -> None:
+def _save(dataset, folder: Path) -> None:
     """The tokens and the facts kept beside them; the text columns, the passes' own and the _row ids (metadata read
     for the checks' messages) are not written."""
     from meepsquared import _data_checks
 
     kept = [c for c in dataset.column_names
             if c not in TEXT_COLUMNS and c not in PASS_COLUMNS and c != _data_checks.ROW]
-    # datasets starts a pool of worker processes for any num_proc it is given, 1 too
-    processes = min(cores, max(1, len(dataset) // CHUNK))
-    dataset.select_columns(kept).save_to_disk(str(folder), num_proc=processes if processes > 1 else None)
+    # In this process: datasets' save_to_disk starts its pool of worker processes (for any num_proc, 1 too) by
+    # spawning them, and a spawned worker runs the caller's script again from its start
+    dataset.select_columns(kept).save_to_disk(str(folder))
 
 
 def _overlap(build: Building, train, eval_prepared) -> list:

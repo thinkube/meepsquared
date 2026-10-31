@@ -68,9 +68,10 @@ def kinds_of(batch: dict, indices: list, where: str) -> dict:
     return {_preprocess.KIND: kinds}
 
 
-def render_failures(batch: dict, tokenizer, assistant_masks: bool) -> dict:
+def render_failures(batch: dict, tokenizer, assistant_masks: bool, chat_template: Optional[str] = None) -> dict:
     """Per row: the error of the chat template or the tokenizer, or "" where it renders; and, with TRL's assistant
-    masks, whether it renders with no assistant token, which TRL refuses."""
+    masks, whether it renders with no assistant token, which TRL refuses. `chat_template`: the template TRL renders
+    with, its training template where it put one in; the tokenizer's own otherwise."""
     from meepsquared import _preprocess
 
     failures, no_answers = [], []
@@ -80,12 +81,13 @@ def render_failures(batch: dict, tokenizer, assistant_masks: bool) -> dict:
             masks = None
             if "messages" in row:
                 out = tokenizer.apply_chat_template(row["messages"], tokenize=True, return_dict=True,
-                                                    return_assistant_tokens_mask=assistant_masks)
+                                                    return_assistant_tokens_mask=assistant_masks,
+                                                    chat_template=chat_template)
                 ids, masks = out["input_ids"], out.get("assistant_masks") if assistant_masks else None
             elif "prompt" in row:
                 if isinstance(row["prompt"], list):
                     ids = tokenizer.apply_chat_template(row["prompt"] + row["completion"], tokenize=True,
-                                                        return_dict=True)["input_ids"]
+                                                        return_dict=True, chat_template=chat_template)["input_ids"]
                 else:
                     ids = tokenizer(row["prompt"] + row["completion"])["input_ids"]
             else:
