@@ -76,17 +76,12 @@ def table_hash(dataset) -> str:
     random one for data made in memory, so the same rows would make another key in each process."""
     import pyarrow as pa
 
-    digest = hashlib.blake2b(digest_size=32)
-
-    class Sink:
-        def write(self, data):
-            digest.update(data)
-            return len(data)
-
+    # The data is in memory already, and so its Arrow stream may be
+    sink = pa.BufferOutputStream()
     table = dataset.with_format("arrow")[:]
-    with pa.ipc.new_stream(pa.PythonFile(Sink(), mode="w"), table.schema) as writer:
+    with pa.ipc.new_stream(sink, table.schema) as writer:
         writer.write_table(table)
-    return digest.hexdigest()
+    return hashlib.blake2b(sink.getvalue().to_pybytes(), digest_size=32).hexdigest()
 
 
 def data_identity(data, split: Optional[str], loaded) -> dict:
