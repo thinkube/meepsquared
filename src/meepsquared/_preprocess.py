@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -337,25 +338,19 @@ class Building:
 
 def preprocess(job, cache_dir, cores: Optional[int] = None, say=print) -> Outcome:
     """The job's SFT data preprocessed into `<cache_dir>/<key>`: found there when made before with the same key,
-    else built now. `say` is told what happens. Of the processes of a launch (torchrun), process 0 preprocesses
-    while the others wait at a barrier, then find its folder."""
+    else built now. `say` is told what happens. Of the processes of a launch (torchrun), process 0 preprocesses,
+    on one core, while the others wait for its folder: the process group is not set up yet, and worker processes
+    started under the launch run its script again; preprocess ahead and give the folder to use the cores."""
+    from meepsquared import _sessions
+
     if int(os.environ.get("WORLD_SIZE", 1)) == 1:
         return _preprocess_here(job, cache_dir, cores, say)
-    from accelerate import PartialState
-
-    state = PartialState()
-    if state.is_main_process:
-        try:
-            # On one core: a pool of worker processes forked from a process that holds the launch's process group
-            # hangs or dies (multiprocess EOFError); preprocess ahead and give the folder to use the cores
-            return _preprocess_here(job, cache_dir, 1, say)
-        finally:
-            state.wait_for_everyone()
-    state.wait_for_everyone()
-    return _preprocess_here(job, cache_dir, cores, say)
+    if _sessions.main_process():
+        return _preprocess_here(job, cache_dir, 1, say)
+    return _preprocess_here(job, cache_dir, 1, say, wait=True)
 
 
-def _preprocess_here(job, cache_dir, cores: Optional[int], say) -> Outcome:
+def _preprocess_here(job, cache_dir, cores: Optional[int], say, wait: bool = False) -> Outcome:
     from meepsquared import _unified_memory, job as _job
     from meepsquared.models import load_tokenizer
 
@@ -386,6 +381,12 @@ def _preprocess_here(job, cache_dir, cores: Optional[int], say) -> Outcome:
                             else None, tokenizer, kind, answer_args, markers, max_length, job.eval_share)
         key = key_of(key_inputs)
         target = cache_dir / key
+        waited = 0
+        while wait and not found(target, key_inputs):
+            if waited % 60 == 0:
+                say(f"waiting for process 0 to preprocess the data into {target}")
+            time.sleep(1)
+            waited += 1
         if found(target, key_inputs):
             report = report_of(target)
             say(f"preprocessed data found in {target}: {report['decision']['text']}")
@@ -513,7 +514,9 @@ def _save(dataset, folder: Path, cores: int) -> None:
 
     kept = [c for c in dataset.column_names
             if c not in TEXT_COLUMNS and c not in PASS_COLUMNS and c != _data_checks.ROW]
-    dataset.select_columns(kept).save_to_disk(str(folder), num_proc=min(cores, max(1, len(dataset) // CHUNK)) or None)
+    # datasets starts a pool of worker processes for any num_proc it is given, 1 too
+    processes = min(cores, max(1, len(dataset) // CHUNK))
+    dataset.select_columns(kept).save_to_disk(str(folder), num_proc=processes if processes > 1 else None)
 
 
 def _overlap(build: Building, train, eval_prepared) -> list:
