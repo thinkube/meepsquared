@@ -40,12 +40,21 @@ def parser() -> argparse.ArgumentParser:
                                            "(exit code 75)")
     train.add_argument("--resume", action="store_true",
                        help="continue from the latest checkpoint in the job's output folder")
+    preprocess = commands.add_parser("preprocess", help="tokenize, check and cut an SFT job's data once, into a "
+                                                        "folder keyed by what made it; nothing is trained")
+    preprocess.add_argument("job", help="the job's YAML file")
+    preprocess.add_argument("--cache", required=True, help="the folder the preprocessed data is kept in, under "
+                                                          "its key; found there when made before from the same inputs")
+    preprocess.add_argument("--json", action="store_true", help="print the outcome as JSON: folder, key, found, "
+                                                                "report")
     return command
 
 
 def main(argv: Optional[list] = None) -> int:
     command = parser()
     args = command.parse_args(argv)
+    if args.command == "preprocess":
+        return _preprocess(args)
     if args.plan_only and (args.status_file or args.stop_file or args.resume):
         command.error("--plan-only trains nothing; --status-file, --stop-file and --resume are for a training")
     try:
@@ -58,6 +67,15 @@ def main(argv: Optional[list] = None) -> int:
                 _sessions.mark_failed(args.status_file, error)
         traceback.print_exc()
         return 1
+
+
+def _preprocess(args) -> int:
+    from meepsquared.job import TrainingJob
+
+    outcome = TrainingJob.from_yaml(args.job).preprocess(args.cache)
+    if args.json:
+        print(json.dumps(outcome.to_dict()), flush=True)
+    return 0
 
 
 def _train(args) -> int:

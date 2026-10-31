@@ -8,7 +8,7 @@ import pytest
 from datasets import Dataset
 
 import meepsquared as m2
-from meepsquared import _data_checks
+from meepsquared import _data_checks, _preprocess
 from meepsquared.job import TrainingJob
 
 from test_sessions import TEXT8, make_job, make_model
@@ -173,7 +173,30 @@ def test_wrong_data_settings_are_refused(recipe, message):
                     recipe=m2.Recipe(max_cut_share=0.1))
 
 
-def test_the_normalized_text_and_the_overlap():
-    assert _data_checks.overlap(["a b", "c"], ["c", "d"], None, None) == [(0, 1, "the same text")]
-    assert _data_checks.overlap(["a"], ["b"], ["x"], ["x"]) == [(0, 0, "the same _row 'x'")]
+def test_the_normalized_text_and_the_named_rows():
+    assert _data_checks.normalized("The  Hare\u00a0runs\n\tFAST") == "the hare runs fast"
     assert _data_checks.rows_text(list(range(7)), None) == "0, 1, 2, 3, 4 and 2 more"
+    # Only the first rows are kept; the count says how many there are
+    assert _data_checks.rows_text([0, 1, 2, 3, 4], ["a", "b", "c", "d", "e"], 7) == \
+        "0 ('a'), 1 ('b'), 2 ('c'), 3 ('d'), 4 ('e') and 2 more"
+    merged = _preprocess.merged({"count": 2, "rows": [4, 9], "ids": ["d", "i"]},
+                                {"count": 1, "rows": [6], "ids": ["f"]})
+    assert merged == {"count": 3, "rows": [4, 6, 9], "ids": ["d", "f", "i"]}
+    assert _preprocess.merged({"count": 1, "rows": [4], "ids": None}, {"count": 0, "rows": [], "ids": None}) == \
+        {"count": 1, "rows": [4], "ids": None}
+
+
+def test_the_passes_keep_facts_alone(tokenizer):
+    # The loss pass: lengths after the cut, and the booleans of the checks
+    batch = {"input_ids": [[3, 4, 5, 6, 7], [3, 4], []], "labels": [[-100, -100, 5, 6, 7], [-100, -100], []]}
+    facts = _data_checks.loss_facts(batch, completion_only=False, markers=None, max_length=3)
+    assert facts == {"_length": [3, 2, 0], "_empty": [False, False, True], "_has_loss": [True, False, False],
+                     "_cut_loss": [True, False, False], "_longer": [True, False, False]}
+    # The hash pass: 16 bytes per row, the same for the same text
+    hashes = _data_checks.text_hashes({"input_ids": [[3, 4], [3, 4], [5]]}, tokenizer)["_hash"]
+    assert len(hashes[0]) == 16 and hashes[0] == hashes[1] != hashes[2]
+    # The origin pass
+    assert _data_checks.kinds_of({"_origin": [{"kind": "real"}, {"kind": "synthetic"}]}, [0, 1], "data") == \
+        {"_kind": ["real", "synthetic"]}
+    with pytest.raises(ValueError, match=r"_origin kinds \[\(1, 'made'\)\] are not one of"):
+        _data_checks.kinds_of({"_origin": [{"kind": "real"}, {"kind": "made"}]}, [0, 1], "data")

@@ -1,7 +1,8 @@
 # Copyright Alejandro Martínez Corriá and the Thinkube contributors
 # SPDX-License-Identifier: Apache-2.0
 
-"""The checks of SFT's data that need the model's tokenizer and chat template, made as the job is planned.
+"""The checks of SFT's data that need the model's tokenizer and chat template, made as the data is preprocessed
+(meepsquared._preprocess), each as a pass over a chunk of rows.
 
 - Rendering: an example the chat template or the tokenizer refuses, or one
   of no tokens, is refused, naming the first rows. TRL tokenizes the whole
@@ -12,8 +13,8 @@
 - No answer: an example whose loss counts no token trains nothing. It is
   left out of training and evaluation, and reported.
 - Overlap: an evaluation example whose rendered text, normalized (Unicode
-  NFKC, case folded, white space collapsed), is a training example's, or
-  whose _row id is one, is refused.
+  NFKC, case folded, white space collapsed) and hashed, is a training
+  example's, or whose _row id is one, is refused.
 - Origin: Datasets marks each row's origin in an _origin column, a mapping
   whose kind is "real" or "synthetic". The plan states the synthetic share
   of the training rows; a synthetic evaluation row is refused.
@@ -23,10 +24,12 @@
   counted tokens, is multiplied by the kind's weight (1 for a kind not
   given). The gradient of an update is then the weighted sum of its tokens'.
 
-The _row and _origin columns are metadata: they are read here and never
-reach the tokenizer, the trainer or the model.
+A pass keeps per row only what the checks need: a length, a few booleans, a
+16-byte hash. The _row and _origin columns are metadata: they are read here
+and never reach the tokenizer, the trainer or the model.
 """
 
+import hashlib
 import unicodedata
 from typing import Optional
 
@@ -39,33 +42,40 @@ EXAMPLES = 5
 WEIGHT = "_meepsquared_weight"
 
 
-def metadata(dataset, where: str) -> dict:
-    """{"row": the _row ids or None, "kind": each row's origin kind or None}; refused for a row without a kind."""
-    rows = list(dataset[ROW]) if ROW in dataset.column_names else None
-    kinds = None
-    if ORIGIN in dataset.column_names:
-        kinds = []
-        missing, unknown = [], []
-        for index, origin in enumerate(dataset[ORIGIN]):
-            kind = origin.get("kind") if isinstance(origin, dict) else None
-            if kind is None:
-                missing.append(index)
-            elif kind not in KINDS:
-                unknown.append((index, kind))
-            kinds.append(kind)
-        if missing:
-            raise ValueError(f"{where}: the _origin of rows {missing[:EXAMPLES]} ({len(missing)} in all) has no kind; "
-                             f"Datasets marks each row {' or '.join(KINDS)}")
-        if unknown:
-            raise ValueError(f"{where}: _origin kinds {unknown[:EXAMPLES]} are not one of {KINDS}")
-    return {"row": rows, "kind": kinds}
+def _rows_of(batch: dict) -> list:
+    """A batch (columns of values) as rows."""
+    names = list(batch.keys())
+    return [dict(zip(names, values)) for values in zip(*(batch[name] for name in names))]
 
 
-def render_failures(dataset, tokenizer, assistant_masks: bool) -> tuple:
-    """(failures, no_answers): rows the chat template or the tokenizer refuses, or that make no tokens, as (row,
-    error); and, with TRL's assistant masks, the rows that render with no assistant token, which TRL refuses."""
+def kinds_of(batch: dict, indices: list, where: str) -> dict:
+    """Each row's origin kind, from its _origin; refused for a row without a kind, or of an unknown one."""
+    from meepsquared import _preprocess
+
+    kinds, missing, unknown = [], [], []
+    for index, origin in zip(indices, batch[ORIGIN]):
+        kind = origin.get("kind") if isinstance(origin, dict) else None
+        if kind is None:
+            missing.append(index)
+        elif kind not in KINDS:
+            unknown.append((index, kind))
+        kinds.append(kind)
+    if missing:
+        raise ValueError(f"{where}: the _origin of rows {missing[:EXAMPLES]} has no kind; Datasets marks each row "
+                         f"{' or '.join(KINDS)}")
+    if unknown:
+        raise ValueError(f"{where}: _origin kinds {unknown[:EXAMPLES]} are not one of {KINDS}")
+    return {_preprocess.KIND: kinds}
+
+
+def render_failures(batch: dict, tokenizer, assistant_masks: bool) -> dict:
+    """Per row: the error of the chat template or the tokenizer, or "" where it renders; and, with TRL's assistant
+    masks, whether it renders with no assistant token, which TRL refuses."""
+    from meepsquared import _preprocess
+
     failures, no_answers = [], []
-    for index, row in enumerate(dataset):
+    for row in _rows_of(batch):
+        failure, no_answer = "", False
         try:
             masks = None
             if "messages" in row:
@@ -81,76 +91,68 @@ def render_failures(dataset, tokenizer, assistant_masks: bool) -> tuple:
             else:
                 ids = tokenizer(row["text"])["input_ids"]
         except Exception as error:  # noqa: BLE001 (any error of the template or the tokenizer names the row)
-            failures.append((index, f"{type(error).__name__}: {error}"))
-            continue
-        if not ids:
-            failures.append((index, "no tokens"))
-        elif masks is not None and 1 not in masks:
-            no_answers.append(index)
-    return failures, no_answers
+            failure = f"{type(error).__name__}: {error}"
+        else:
+            if not ids:
+                failure = "no tokens"
+            elif masks is not None and 1 not in masks:
+                no_answer = True
+        failures.append(failure)
+        no_answers.append(no_answer)
+    return {_preprocess.FAILURE: failures, _preprocess.NO_ANSWER: no_answers}
 
 
-def counted(dataset, completion_only: bool, markers: Optional[tuple]) -> list:
-    """The tokens each tokenized example's loss counts, as lists of booleans: by TRL's labels or masks (TRL 1.x
-    turns its masks into labels, TRL 0.29 keeps them), and by meepsquared's turn markers (token ids) when given."""
+def counted(ids: list, labels: Optional[list], assistant_masks: Optional[list], completion_mask: Optional[list],
+            completion_only: bool, markers: Optional[tuple]) -> list:
+    """The tokens of one tokenized example the loss counts, as booleans: by TRL's labels or masks, and by
+    meepsquared's turn markers (token ids) when given."""
     from meepsquared.chat_templates import response_mask
 
-    columns = dataset.column_names
-    data = dataset.select_columns([c for c in ("input_ids", "labels", "assistant_masks", "completion_mask")
-                                   if c in columns]).to_dict()
-    out = []
-    for index, ids in enumerate(data["input_ids"]):
-        keep = [True] * len(ids)
-        if "labels" in data:
-            keep = [k and label != -100 for k, label in zip(keep, data["labels"][index])]
-        if "assistant_masks" in data:
-            keep = [k and bool(m) for k, m in zip(keep, data["assistant_masks"][index])]
-        if completion_only and "completion_mask" in data:
-            keep = [k and bool(m) for k, m in zip(keep, data["completion_mask"][index])]
-        if markers is not None:
-            keep = [k and m for k, m in zip(keep, response_mask(list(ids), markers[0], markers[1]))]
-        out.append(keep)
-    return out
+    keep = [True] * len(ids)
+    if labels is not None:
+        keep = [k and label != -100 for k, label in zip(keep, labels)]
+    if assistant_masks is not None:
+        keep = [k and bool(m) for k, m in zip(keep, assistant_masks)]
+    if completion_only and completion_mask is not None:
+        keep = [k and bool(m) for k, m in zip(keep, completion_mask)]
+    if markers is not None:
+        keep = [k and m for k, m in zip(keep, response_mask(list(ids), markers[0], markers[1]))]
+    return keep
 
 
-def normalized(dataset, tokenizer) -> list:
-    """Each tokenized example's text, decoded, in Unicode NFKC, case folded, its white space collapsed."""
-    texts = tokenizer.batch_decode(list(dataset["input_ids"]))
-    return [" ".join(unicodedata.normalize("NFKC", text).casefold().split()) for text in texts]
+def loss_facts(batch: dict, completion_only: bool, markers: Optional[tuple], max_length: int) -> dict:
+    """Per row: its length after the cut to max_length, whether it has no token, whether its loss counts a token,
+    whether a counted token lies past max_length (the cut drops it), and whether it is longer than max_length."""
+    from meepsquared import _preprocess
+
+    lengths, empty, has_loss, cut_loss, longer = [], [], [], [], []
+    count = len(batch["input_ids"])
+    labels = batch.get("labels", [None] * count)
+    assistant = batch.get("assistant_masks", [None] * count)
+    completion = batch.get("completion_mask", [None] * count)
+    for i, ids in enumerate(batch["input_ids"]):
+        keep = counted(ids, labels[i], assistant[i], completion[i], completion_only, markers)
+        lengths.append(min(len(ids), max_length))
+        empty.append(len(ids) == 0)
+        has_loss.append(any(keep))
+        cut_loss.append(any(keep[max_length:]))
+        longer.append(len(ids) > max_length)
+    return {_preprocess.LENGTH: lengths, _preprocess.EMPTY: empty, _preprocess.HAS_LOSS: has_loss,
+            _preprocess.CUT_LOSS: cut_loss, _preprocess.LONGER: longer}
 
 
-def overlap(train_texts: list, eval_texts: list, train_rows: Optional[list], eval_rows: Optional[list]) -> list:
-    """(evaluation row, training row, how) of each evaluation example that is a training example."""
-    by_text = {}
-    for index, text in enumerate(train_texts):
-        by_text.setdefault(text, index)
-    by_row = {}
-    if train_rows is not None and eval_rows is not None:
-        for index, row in enumerate(train_rows):
-            by_row.setdefault(row, index)
-    found = []
-    for index, text in enumerate(eval_texts):
-        if text in by_text:
-            found.append((index, by_text[text], "the same text"))
-        elif eval_rows is not None and eval_rows[index] in by_row:
-            found.append((index, by_row[eval_rows[index]], f"the same _row {eval_rows[index]!r}"))
-    return found
+def normalized(text: str) -> str:
+    """The text in Unicode NFKC, case folded, its white space collapsed."""
+    return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
 
 
-def cut(dataset, max_length: int):
-    """Every per-token column of each example cut to its first max_length tokens, as TRL and meepsquared's collator cut
-    them."""
-    import pyarrow.compute as pc
+def text_hashes(batch: dict, tokenizer) -> dict:
+    """Per row: a 16-byte hash of its tokens decoded and normalized, for the overlap check."""
+    from meepsquared import _preprocess
 
-    from meepsquared import _trl
-
-    if max(pc.list_value_length(dataset.data.column("input_ids")).to_pylist(), default=0) <= max_length:
-        return dataset
-    from meepsquared import _unified_memory
-
-    cores = _unified_memory.job_cores()
-    return dataset.map(_trl._cut, fn_kwargs={"max_length": max_length}, desc="Cutting to max_length",
-                       num_proc=cores if cores > 1 else None)
+    texts = tokenizer.batch_decode(batch["input_ids"])
+    return {_preprocess.HASH: [hashlib.blake2b(normalized(text).encode(), digest_size=16).digest()
+                               for text in texts]}
 
 
 class _Weighted:
@@ -209,7 +211,9 @@ def install_weights(trainer, weights: list) -> None:
     trainer.compute_loss = weighted
 
 
-def rows_text(rows: list, ids: Optional[list]) -> str:
-    """The first EXAMPLES rows, with their _row ids when the data has them."""
-    shown = [f"{row} ({ids[row]!r})" if ids is not None else str(row) for row in rows[:EXAMPLES]]
-    return ", ".join(shown) + (f" and {len(rows) - EXAMPLES} more" if len(rows) > EXAMPLES else "")
+def rows_text(rows: list, ids: Optional[list], count: Optional[int] = None) -> str:
+    """The first EXAMPLES rows (by their place in the data), with their _row ids when the data has them, and how
+    many more there are of `count`."""
+    count = len(rows) if count is None else count
+    shown = [f"{row} ({ids[i]!r})" if ids is not None else str(row) for i, row in enumerate(rows[:EXAMPLES])]
+    return ", ".join(shown) + (f" and {count - EXAMPLES} more" if count > EXAMPLES else "")

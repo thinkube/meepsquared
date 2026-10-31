@@ -26,6 +26,7 @@ and the command `meepsquared train job.yaml` (see meepsquared.cli).
 import dataclasses
 import importlib
 import importlib.util
+import json
 import math
 import os
 import re
@@ -68,6 +69,8 @@ EFFECTIVE_BATCH_ABOVE_13B = 16
 OPTIMIZER = "adamw_8bit"
 # Tokens per example: TRL's SFTConfig default
 MAX_LENGTH = 1024
+# The folder of the output folder a plan preprocesses the data into when none is given
+PREPROCESSED = "preprocessed"
 # The schedule default will be set by the measurement round (thinkube-release
 # PLAN F5: a constant rate against warm-up and cosine decay, on the same job)
 SCHEDULE = "constant"
@@ -187,6 +190,11 @@ def data_format(columns, task: str) -> tuple[str, list]:
 
 def _gib(n: float) -> str:
     return f"{n / 2**30:.2f} GiB"
+
+
+def _say(text: str) -> None:
+    if os.environ.get("MEEPSQUARED_QUIET") != "1":
+        print(text, flush=True)
 
 
 def _check_positive(name: str, value, kind=int) -> None:
@@ -574,7 +582,7 @@ class _Prepared:
 
 @dataclass
 class _Data:
-    """SFT's data as the trainer trains it (see TrainingJob._checked)."""
+    """SFT's data as the trainer trains it (see TrainingJob._data)."""
 
     train: Any
     eval: Any
@@ -583,6 +591,7 @@ class _Data:
     kinds: Optional[list]
     weights: Optional[list]
     decision: Decision
+    report: dict
 
 
 @dataclass
@@ -625,6 +634,10 @@ class TrainingJob:
         of each group, a function (hypotheses, references) -> {metric: number}
         or its name as 'module:function' or 'file.py:function'. SFT only, on
         one process. See meepsquared._milestones.
+    preprocessed: SFT only: the folder of the data preprocessed by
+        job.preprocess(cache_dir) (meepsquared._preprocess), read memory-mapped
+        after the check that it was made from this job's inputs. Without it,
+        the plan preprocesses the data first, into <output>/preprocessed.
     recipe, overrides: see Recipe and Overrides.
     """
 
@@ -647,6 +660,7 @@ class TrainingJob:
     milestone_eval: Any = None
     milestone_scorer: Any = None
     tokenizer: Any = None
+    preprocessed: Any = None
     recipe: Recipe = field(default_factory=Recipe)
     overrides: Overrides = field(default_factory=Overrides)
     _prepared: Optional[_Prepared] = field(default=None, init=False, repr=False, compare=False)
@@ -683,6 +697,8 @@ class TrainingJob:
             raise ValueError("eval_every: no evaluation data; give eval_data or eval_share")
         if self.task != "sft" and (self.eval_data is not None or self.eval_share is not None):
             raise ValueError("eval_data and eval_share are SFT settings: GRPO's reward is its measure")
+        if self.task != "sft" and self.preprocessed is not None:
+            raise ValueError("preprocessed is an SFT setting: GRPO's prompts are not tokenized ahead")
         if self.task != "sft" and self.timed_steps:
             raise ValueError("timed_steps: the plan times SFT's steps; GRPO's steps generate their completions")
         if self.task == "grpo" and not self.rewards:
@@ -759,6 +775,7 @@ class TrainingJob:
                "eval_data": str(self.eval_data) if self.eval_data is not None else None,
                "eval_split": self.eval_split, "eval_share": self.eval_share, "eval_every": self.eval_every,
                "timed_steps": self.timed_steps, "milestones": self.milestones,
+               "preprocessed": str(self.preprocessed) if self.preprocessed is not None else None,
                "milestone_eval": str(self.milestone_eval) if self.milestone_eval is not None else None,
                "milestone_scorer": (reward_name(self.milestone_scorer, "milestone_scorer")
                                     if self.milestone_scorer is not None else None),
@@ -881,8 +898,9 @@ class TrainingJob:
 
     # What plan() does
 
-    def _dataset(self):
-        """The data as a datasets.Dataset, and a description of where it came from."""
+    def _dataset(self, cache_dir: Optional[str] = None):
+        """The data as a datasets.Dataset, and a description of where it came from; a file is read into
+        `cache_dir` when given."""
         from datasets import Dataset, load_dataset
 
         if self.data is None:
@@ -896,11 +914,12 @@ class TrainingJob:
             builder = DATA_SUFFIXES.get(path.suffix.lower())
             if builder is None:
                 raise ValueError(f"data: {path} is not a .jsonl, .json or .parquet file")
-            return load_dataset(builder, data_files=str(path), split="train"), str(path)
+            return load_dataset(builder, data_files=str(path), split="train", cache_dir=cache_dir), str(path)
         return load_dataset(str(self.data), split=self.split), f"{self.data}, split {self.split}"
 
-    def _eval_dataset(self):
-        """eval_data as a datasets.Dataset, and a description of where it came from."""
+    def _eval_dataset(self, cache_dir: Optional[str] = None):
+        """eval_data as a datasets.Dataset, and a description of where it came from; a file is read into
+        `cache_dir` when given."""
         from datasets import Dataset, DatasetDict, load_dataset
 
         data, split = self.eval_data, self.eval_split
@@ -924,7 +943,7 @@ class TrainingJob:
             builder = DATA_SUFFIXES.get(path.suffix.lower())
             if builder is None:
                 raise ValueError(f"eval_data: {path} is not a .jsonl, .json or .parquet file")
-            return load_dataset(builder, data_files=str(path), split="train"), str(path)
+            return load_dataset(builder, data_files=str(path), split="train", cache_dir=cache_dir), str(path)
         split = split if split is not None else EVAL_SPLIT
         return load_dataset(str(data), split=split), f"{data}, split {split}"
 
@@ -1108,193 +1127,88 @@ class TrainingJob:
                                  "vLLM is installed apart, and Overrides(vllm=True) uses it",
                                  "meepsquared sends the trained weights to vLLM under their checkpoint names"))
 
-    def _tokenized(self, peft_model, tokenizer, dataset, eval_dataset, args: dict) -> tuple:
-        """TRL's tokenized training set and evaluation set (None without one), and how the trainer that trains
-        loads them (an meepsquared._batches.Loading). TRL tokenizes both with the same settings, so the evaluation
-        loss is counted as the training loss is.
+    def preprocess(self, cache_dir, cores: Optional[int] = None, say=print):
+        """SFT's data tokenized, checked and cut, into `<cache_dir>/<key>` (see meepsquared._preprocess); found
+        there when made before from the same inputs. Returns the Outcome: folder, key, found, report."""
+        from meepsquared import _preprocess
 
-        meepsquared lays out the micro-batches from the examples' lengths, and the
-        memory is measured on the largest of them (see meepsquared._batches); TRL
-        tokenizes the data when its trainer is built (TRL 0.29 and 1.x alike,
-        in __init__). So a trainer is built first, with provisional batch
-        settings, for its dataset alone; the trainer that trains is built
-        afterwards from that dataset (dataset_kwargs skip_prepare_dataset),
-        with the batch chosen. The provisional trainer measures nothing and
-        compiles nothing; the trainer that trains pads the batches of a model
-        with compiled layers to a multiple (see meepsquared._trl), and the Loading
-        says so.
+        return _preprocess.preprocess(self, cache_dir, cores, say)
+
+    def _loading(self, peft_model, tokenizer, dataset, eval_dataset, args: dict):
+        """How the trainer that trains loads the preprocessed data (an meepsquared._batches.Loading).
+
+        meepsquared lays out the micro-batches from the examples' lengths, and
+        the memory is measured on the largest of them (see meepsquared._batches),
+        so the trainer that trains is built after the layout; a provisional
+        trainer is built first, for its Loading alone, on the data as
+        preprocessed (dataset_kwargs skip_prepare_dataset). It measures nothing
+        and compiles nothing; the trainer that trains pads the batches of a
+        model with compiled layers to a multiple (see meepsquared._trl), and the
+        Loading says so.
         """
         from trl import SFTConfig, SFTTrainer
 
-        from meepsquared import _batches, _checkpointing, _trl, _unified_memory
+        from meepsquared import _batches, _checkpointing, _trl
 
         was = peft_model._meepsquared_gradient_checkpointing, peft_model._meepsquared_compile_layers
         peft_model._meepsquared_gradient_checkpointing = len(_checkpointing.layers(peft_model))
         peft_model._meepsquared_compile_layers = False
         try:
-            # A batch of 2 rows: this trainer only tokenizes the data and lays out the batches, and TRL warns
-            # about padding-free training with a batch of 1 row, which a reader would take for the training's.
-            # TRL tokenizes on the job's cores: a large dataset is minutes a core
-            cores = _unified_memory.job_cores()
+            # A batch of 2 rows: TRL warns about padding-free training with a batch of 1 row, which a reader would
+            # take for the training's
             trainer = SFTTrainer(model=peft_model,
                                  args=SFTConfig(max_length=None, per_device_train_batch_size=2,
                                                 gradient_accumulation_steps=1, max_steps=1, report_to=[],
-                                                dataset_num_proc=cores if cores > 1 else None, **args),
+                                                dataset_kwargs={"skip_prepare_dataset": True}, **args),
                                  train_dataset=dataset, eval_dataset=eval_dataset, processing_class=tokenizer)
         finally:
             peft_model._meepsquared_gradient_checkpointing, peft_model._meepsquared_compile_layers = was
         loading = _batches.loading(trainer)
         if was[1] and loading.padded and "pad_to_multiple_of" not in args:
             loading = dataclasses.replace(loading, multiple=_trl.COMPILED_PAD_MULTIPLE)
-        return trainer.train_dataset, trainer.eval_dataset if eval_dataset is not None else None, loading
+        return loading
 
-    def _checked(self, peft_model, tokenizer, dataset, eval_dataset, meta: dict, eval_meta: Optional[dict],
-                 markers, answer_args: dict, max_length: int, args: dict) -> _Data:
-        """SFT's data tokenized by TRL, checked (see meepsquared._data_checks), with the rows that train nothing left
-        out, the evaluation share held out, and every example cut to max_length.
+    def _data(self, peft_model, tokenizer, folder, kind: str, markers, answer_args: dict, max_length: int,
+              args: dict) -> _Data:
+        """SFT's data as preprocessed in `folder` (see meepsquared._preprocess), memory-mapped, after the check
+        that the folder was made from this job's inputs."""
+        from meepsquared import _preprocess
 
-        TRL tokenizes without max_length here, so that the checks see whole
-        examples; meepsquared then cuts them as TRL would (keeping their start).
-        """
-        from meepsquared import _batches
-        from meepsquared import _data_checks as checks
-
-        assistant = bool(answer_args.get("assistant_only_loss"))
-        completion_only = bool(answer_args.get("completion_only_loss"))
-        marker_ids = None
-        if markers is not None:
-            plain = getattr(tokenizer, "tokenizer", tokenizer)
-            marker_ids = tuple(plain(part, add_special_tokens=False)["input_ids"] for part in markers)
-        rows = list(range(len(dataset)))
-        eval_rows = list(range(len(eval_dataset))) if eval_dataset is not None else None
-        dropped = {"data": [], "eval_data": []}
-        try:
-            prepared, eval_prepared, loading = self._tokenized(peft_model, tokenizer, dataset, eval_dataset, args)
-        except Exception as error:
-            # TRL tokenizes a set at once: each row is rendered alone to name the ones that fail
-            found = {"data": checks.render_failures(dataset, tokenizer, assistant)}
-            if eval_dataset is not None:
-                found["eval_data"] = checks.render_failures(eval_dataset, tokenizer, assistant)
-            refused = [f"{where} rows {checks.rows_text([row for row, _ in failures], None)} "
-                       f"({failures[0][1]})" for where, (failures, _) in found.items() if failures]
-            if refused:
-                raise ValueError(f"examples that do not render through the chat template or the tokenizer: "
-                                 f"{'; '.join(refused)}") from error
-            if not any(no_answers for _, no_answers in found.values()):
-                raise
-            # TRL refuses an example with no assistant token: such rows train nothing, and are left out
-            dropped = {where: no_answers for where, (_, no_answers) in found.items()}
-            out = set(dropped["data"])
-            rows = [row for row in rows if row not in out]
-            dataset = dataset.select(rows)
-            if eval_dataset is not None:
-                out = set(dropped["eval_data"])
-                eval_rows = [row for row in eval_rows if row not in out]
-                eval_dataset = eval_dataset.select(eval_rows)
-            prepared, eval_prepared, loading = self._tokenized(peft_model, tokenizer, dataset, eval_dataset, args)
-        if len(prepared) != len(rows) or (eval_prepared is not None and len(eval_prepared) != len(eval_rows)):
-            raise RuntimeError("TRL's tokenized data has another row count than the data; meepsquared's checks name rows "
-                               "by their place in the data")
-
-        def check(tokenized, places: list, where: str) -> tuple:
-            """(the tokenized set without its rows of no answer token, the places kept, the facts)."""
-            lengths = [len(ids) for ids in tokenized["input_ids"]]
-            empty = [places[i] for i, n in enumerate(lengths) if n == 0]
-            if empty:
-                raise ValueError(f"examples that do not render through the chat template or the tokenizer: {where} "
-                                 f"rows {checks.rows_text(empty, None)} make no tokens")
-            loss = checks.counted(tokenized, completion_only, marker_ids)
-            longer = [places[i] for i, n in enumerate(lengths) if n > max_length]
-            cut = [places[i] for i, keep in enumerate(loss) if any(keep[max_length:])]
-            none = [i for i, keep in enumerate(loss) if not any(keep)]
-            out = set(none)
-            kept = [i for i in range(len(places)) if i not in out]
-            facts = {"rows": len(places) + len(dropped[where]), "longer": sorted(longer), "answers_cut": sorted(cut),
-                     "no_answer": sorted(dropped[where] + [places[i] for i in none])}
-            if not kept:
-                raise ValueError(f"{where}: no example has a token the loss counts")
-            if none:
-                tokenized = tokenized.select(kept)
-            return tokenized, [places[i] for i in kept], facts
-
-        prepared, rows, facts = check(prepared, rows, "data")
-        eval_facts = None
-        if eval_prepared is not None:
-            eval_prepared, eval_rows, eval_facts = check(eval_prepared, eval_rows, "eval_data")
-        cut_share = len(facts["answers_cut"]) / facts["rows"]
-        if self.recipe.max_cut_share is not None and cut_share > self.recipe.max_cut_share:
-            raise ValueError(f"max_length {max_length} cuts answer tokens of {len(facts['answers_cut'])} of "
-                             f"{facts['rows']} examples ({cut_share:.1%}), more than max_cut_share "
-                             f"{self.recipe.max_cut_share:g}: rows "
-                             f"{checks.rows_text(facts['answers_cut'], meta['row'])}")
-
-        # The evaluation share, held out of the rows that train
-        held = 0
-        if self.eval_share is not None:
-            # Held out of the real rows where the data marks each row's origin: an evaluation is on real data
-            candidates = list(range(len(prepared)))
-            if meta["kind"] is not None:
-                candidates = [i for i in candidates if meta["kind"][rows[i]] == "real"]
-                if max(1, round(self.eval_share * len(candidates))) >= len(candidates):
-                    raise ValueError(f"eval_share={self.eval_share:g} holds out real rows only (the data has _origin), "
-                                     f"and the data has {len(candidates)} real rows: too few to hold out any and "
-                                     "keep one to train")
-            chosen = set(candidates[i] for i in _batches.held_out(len(candidates), self.eval_share, loading.seed)[1])
-            held_rows = sorted(chosen)
-            trained = [i for i in range(len(prepared)) if i not in chosen]
-            eval_prepared, prepared = prepared.select(held_rows), prepared.select(trained)
-            eval_rows, rows = [rows[i] for i in held_rows], [rows[i] for i in trained]
-            eval_meta, held = meta, len(held_rows)
-
-        def of(values: Optional[list], places: list) -> Optional[list]:
-            return [values[place] for place in places] if values is not None else None
-
-        kinds = of(meta["kind"], rows)
-        if self.recipe.source_weights is not None and kinds is None:
-            raise ValueError("recipe.source_weights weights the loss by each row's origin, and the data has no "
-                             "_origin column")
-        if eval_prepared is not None:
-            found = checks.overlap(checks.normalized(prepared, tokenizer), checks.normalized(eval_prepared, tokenizer),
-                                   of(meta["row"], rows), of(eval_meta["row"], eval_rows))
-            if found:
-                named = ", ".join(f"evaluation row {eval_rows[e]} is training row {rows[t]} ({how})"
-                                  for e, t, how in found[:checks.EXAMPLES])
-                raise ValueError(f"{len(found)} evaluation examples are training examples: {named}")
-            eval_kinds = of(eval_meta["kind"], eval_rows)
-            synthetic = [eval_rows[i] for i, kind in enumerate(eval_kinds or []) if kind == "synthetic"]
-            if synthetic:
-                raise ValueError(f"{len(synthetic)} evaluation examples are synthetic (_origin kind 'synthetic'): "
-                                 f"rows {checks.rows_text(synthetic, eval_meta['row'])}; evaluate on real data")
-        synthetic_share = kinds.count("synthetic") / len(kinds) if kinds is not None else None
-
-        value = {**{name: facts[name] if name == "rows" else {"count": len(facts[name]),
-                                                              "rows": facts[name][:checks.EXAMPLES]}
-                    for name in ("rows", "longer", "answers_cut", "no_answer")},
-                 "eval_no_answer": ({"count": len(eval_facts["no_answer"]),
-                                     "rows": eval_facts["no_answer"][:checks.EXAMPLES]} if eval_facts else None),
-                 "overlap": 0 if eval_prepared is not None else None, "synthetic_share": synthetic_share}
-        text = (f"{facts['rows']:,} rows render; {len(facts['longer']):,} longer than {max_length} tokens, "
-                f"{len(facts['answers_cut']):,} of them with answer tokens cut; {len(facts['no_answer']):,} without "
-                "answer tokens, left out")
-        if eval_facts is not None and eval_facts["no_answer"]:
-            text += f" (and {len(eval_facts['no_answer']):,} of the evaluation data)"
-        if eval_prepared is not None:
-            text += "; no evaluation example is a training example"
-        if synthetic_share is not None:
-            text += f"; {synthetic_share:.0%} of the training rows synthetic"
-        named = [f"{label} {checks.rows_text(facts[name], meta['row'])}"
-                 for name, label in (("answers_cut", "answers cut: rows"), ("no_answer", "no answer: rows"))
-                 if facts[name]]
-        reason = ("the cut keeps each example's start" + (f"; max_cut_share {self.recipe.max_cut_share:g} refuses more"
-                                                           if self.recipe.max_cut_share is not None else
-                                                           "; Recipe(max_cut_share=...) refuses more than a share")
-                  + "; a row of no answer token trains nothing" + "".join(f"; {part}" for part in named))
-        weights = None
+        inputs = self._preprocess_inputs(tokenizer, kind, answer_args, markers, max_length)
+        train, eval_prepared, report = _preprocess.open_folder(folder, inputs)
+        if report["kind"] != kind:
+            raise ValueError(f"preprocessed: {folder} holds {report['kind']}, and the job's data is {kind}")
+        loading = self._loading(peft_model, tokenizer, train, eval_prepared, args)
+        if loading.seed != report["seed"]:
+            raise ValueError(f"the trainer's seed {loading.seed} is not the seed {report['seed']} the data was "
+                             "preprocessed with (its held-out share and the order of its micro-batches)")
+        kinds = weights = None
         if self.recipe.source_weights is not None:
-            weights = [self.recipe.source_weights.get(kind, 1.0) for kind in kinds]
-        return _Data(checks.cut(prepared, max_length),
-                     checks.cut(eval_prepared, max_length) if eval_prepared is not None else None,
-                     loading, held, kinds, weights, Decision("data_checks", "data checks", value, text, reason))
+            kinds = list(train[_preprocess.KIND])
+            weights = [self.recipe.source_weights.get(kind_, 1.0) for kind_ in kinds]
+        # The facts kept beside the tokens are read; the trainer gets the tokens alone
+        facts = [c for c in train.column_names if c in _preprocess.FACT_COLUMNS]
+        train = train.remove_columns(facts)
+        if eval_prepared is not None:
+            eval_prepared = eval_prepared.remove_columns([c for c in eval_prepared.column_names
+                                                          if c in _preprocess.FACT_COLUMNS])
+        decision = Decision(**report["decision"])
+        return _Data(train, eval_prepared, loading, report["held"], kinds, weights, decision, report)
+
+    def _preprocess_inputs(self, tokenizer, kind: str, answer_args: dict, markers, max_length: int) -> dict:
+        """The inputs that key this job's preprocessing (see meepsquared._preprocess.inputs), the data identified
+        without loading a file."""
+        from meepsquared import _preprocess
+
+        def identity(data, split):
+            if isinstance(data, (str, os.PathLike)) and Path(data).exists():
+                return _preprocess.data_identity(data, split, None)
+            loaded = self._dataset()[0] if data is self.data else self._eval_dataset()[0]
+            return _preprocess.data_identity(data, split, loaded)
+
+        return _preprocess.inputs(identity(self.data, self.split),
+                                  identity(self.eval_data, self.eval_split) if self.eval_data is not None else None,
+                                  tokenizer, kind, answer_args, markers, max_length, self.eval_share)
 
     def _prepare(self) -> _Prepared:
         if self._prepared is not None:
@@ -1304,29 +1218,29 @@ class TrainingJob:
         from trl import GRPOConfig, SFTConfig
 
         from meepsquared import (_allocator, _batches, _checkpointing, _compile, _data_checks, _milestones, _moe,
-                            _selective, _sessions, _unified_memory, chat_templates)
+                            _preprocess, _selective, _sessions, _unified_memory, chat_templates)
         from meepsquared.models import DEFAULT_TARGETS, MeepLanguageModel, _fused_wanted, keeps_examples_apart
 
         recipe, overrides = self.recipe, self.overrides
-        dataset, source = self._dataset()
-        kind, columns = data_format(dataset.column_names, self.task)
-        meta = eval_meta = None
+        output = self._output(self.model)
+        dataset = source = eval_source = None
         if self.task == "sft":
-            meta = _data_checks.metadata(dataset, "data")
-            dataset = dataset.select_columns(columns)
-        eval_dataset = eval_source = None
-        if self.eval_data is not None:
-            eval_dataset, eval_source = self._eval_dataset()
-            eval_kind, eval_columns = data_format(eval_dataset.column_names, self.task)
-            if eval_kind != kind:
-                raise ValueError(f"eval_data holds {eval_kind}, and the training data {kind}; give both alike")
-            eval_meta = _data_checks.metadata(eval_dataset, "eval_data")
-            eval_dataset = eval_dataset.select_columns(eval_columns)
+            # The data is preprocessed (tokenized, checked, cut) before the model loads: by the caller, into
+            # the folder given as `preprocessed`, else here, into the output folder
+            folder = self.preprocessed
+            if folder is None:
+                folder = _preprocess.preprocess(self, Path(output) / PREPROCESSED, say=_say).folder
+            with open(Path(folder) / _preprocess.REPORT_FILE) as f:
+                report = json.load(f)
+            kind, source, eval_source, rows = report["kind"], report["source"], report["eval_source"], report["rows"]
+        else:
+            dataset, source = self._dataset()
+            kind, columns = data_format(dataset.column_names, self.task)
+            rows = len(dataset)
         rewards = [load_reward(r) for r in self.rewards] if self.rewards else None
         max_length = recipe.max_length if recipe.max_length is not None else MAX_LENGTH
 
         model, tokenizer, decisions = self._load(max_length)
-        output = self._output(model)
         base_dtype = model.get_input_embeddings().weight.dtype
         dtype_name = str(base_dtype).removeprefix("torch.")
         device = next(model.parameters()).device
@@ -1449,22 +1363,20 @@ class TrainingJob:
                      or measured_budget)
         measure = need_auto or device.type == "cuda"
         measured = {}
-        # SFT: TRL tokenizes the data first (see _tokenized), with the settings of the loss on the
-        # answers, which decide the masks it tokenizes; the micro-batches are laid out from the
-        # examples' lengths
+        # SFT: the data as preprocessed, memory-mapped (see _data); the micro-batches are laid out
+        # from the examples' lengths
         prepared, lengths, loading, markers, answer_args, data = None, None, None, None, {}, None
-        # The evaluation set, tokenized; with eval_share, held out of the training data before the
-        # micro-batches are laid out, so that none is trained on or measured
+        # The evaluation set, preprocessed alike; with eval_share, held out of the training data
+        # before the micro-batches are laid out, so that none is trained on or measured
         eval_prepared, held = None, 0
         base_args = {"output_dir": output, "bf16": base_dtype == torch.bfloat16, "fp16": base_dtype == torch.float16,
                      "use_cpu": device.type == "cpu"}
         if self.task == "sft":
             markers = self._answers(kind, tokenizer, answer_args, decisions)
-            data = self._checked(peft_model, tokenizer, dataset, eval_dataset, meta, eval_meta, markers, answer_args,
-                                 max_length,
-                                 {**base_args, **answer_args,
-                                  **({"padding_free": overrides.padding_free} if overrides.padding_free is not None
-                                     else {})})
+            data = self._data(peft_model, tokenizer, folder, kind, markers, answer_args, max_length,
+                              {**base_args, **answer_args,
+                               **({"padding_free": overrides.padding_free} if overrides.padding_free is not None
+                                  else {})})
             prepared, eval_prepared, loading, held = data.train, data.eval, data.loading, data.held
             decisions.append(data.decision)
             weights_text = (", ".join(f"{kind} rows x{weight:g}" for kind, weight in recipe.source_weights.items())
@@ -1473,8 +1385,6 @@ class TrainingJob:
                                       "each micro-batch holds rows of one origin kind, and its loss is multiplied "
                                       "by the kind's weight" if recipe.source_weights is not None
                                       else "every row's loss weighs the same"))
-            if self.eval_share is not None:
-                eval_source = f"{source}, held out with seed {loading.seed}"
             lengths = _batches.lengths(prepared, max_length)
         # With a token budget: the budget of each process in rows (slots) of max_length tokens
         slots = None
@@ -1688,7 +1598,7 @@ class TrainingJob:
         if self.task == "grpo":
             decisions.append(_decide("generations", "generations", recipe.generations, generations, str,
                                      "TRL's default"))
-        decisions.append(Decision("data", "data", source, f"{source}: {len(dataset):,} rows of {kind}"
+        decisions.append(Decision("data", "data", source, f"{source}: {rows:,} rows of {kind}"
                                   + (f", {held:,} of them held out for evaluation" if held else "")))
         decisions.append(Decision("output", "output", output, output,
                                   "as given" if self.output is not None else "named after the model and the task"))
@@ -1773,7 +1683,7 @@ class TrainingJob:
                                               f"{effective_auto} examples per update, {effective_why}"))
         else:
             planned = planned_steps(self.steps, self.epochs,
-                                    batches_per_epoch(len(dataset), micro, world, self.task, generations), accumulation)
+                                    batches_per_epoch(rows, micro, world, self.task, generations), accumulation)
         warmup_auto = warmup_steps(planned)
         warmup = recipe.warmup_steps if recipe.warmup_steps is not None else warmup_auto
         trainer.args.warmup_steps = warmup

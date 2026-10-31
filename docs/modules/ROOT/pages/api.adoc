@@ -29,6 +29,7 @@ _Every public name of Meep² and its arguments._
 | `eval_every` | about 10 evaluations over the planned steps | Optimizer steps between evaluations (and one at the last step). Needs `eval_data` or `eval_share`. See xref:training-job.adoc#_evaluation[Evaluation].
 | `timed_steps` | `3` on a GPU, none on the CPU | SFT only: the optimizer steps the plan times, after one to warm up, for its time per step; `0` times none. Set by hand, the steps are timed on the CPU too. See xref:training-job.adoc#_the_length_of_the_training[Training jobs].
 | `tokenizer` | `None` | The tokenizer, when `model` is a loaded model.
+| `preprocessed` | `None` | SFT only: the folder of the data preprocessed by `job.preprocess(cache_dir)`, read memory-mapped after the check that it was made from this job's inputs. Without it, the plan preprocesses the data first, into `<output>/preprocessed/`. See xref:training-job.adoc#_preprocessing[Preprocessing].
 | `recipe` | `Recipe()` | The training choices; see <<_recipe>>.
 | `overrides` | `Overrides()` | The hardware choices; see <<_overrides>>.
 |===
@@ -40,11 +41,12 @@ _Every public name of Meep² and its arguments._
 | `job.plan()` | Loads the model, adds LoRA, measures the memory and builds TRL's trainer; returns the <<_plan>>. Nothing is trained. A second call returns the same plan.
 | `job.train(resume=False, stop_file=None, status_file=None, stop_on_sigterm=False)` | Prints the plan (unless `MEEPSQUARED_QUIET=1`), trains, and returns the <<_result>>. A job trains once; make a new job to train again. `resume=True` continues from the latest checkpoint in the output folder; `stop_file`: when the file exists at the end of an optimizer step, the training saves a checkpoint and stops; `stop_on_sigterm`: a SIGTERM does the same; `status_file`: the training's state as JSON, written as it goes. Without `resume`, an output folder holding checkpoints is refused. See xref:training-job.adoc#_stopping_and_resuming[Stopping and resuming].
 | `job.trainer()` | TRL's `SFTTrainer` or `GRPOTrainer`, set up as `train()` runs it, not trained. A change you make to it, such as `train_on_responses_only`, is kept when `job.train()` runs.
+| `job.preprocess(cache_dir, cores=None, say=print)` | SFT only: the data tokenized, checked and cut into `<cache_dir>/<key>/`, found there when made before from the same inputs. Returns the outcome: `folder`, `key`, `found`, `report` (`to_dict()` gives them as data). See xref:training-job.adoc#_preprocessing[Preprocessing].
 | `job.to_dict()`, `TrainingJob.from_dict(data)` | The job as plain data. A loaded model, a `datasets.Dataset`, a tokenizer and a reward function without an importable name cannot be written as data.
 | `job.to_yaml()`, `TrainingJob.from_yaml(path)` | The same as YAML.
 |===
 
-The command `meepsquared train job.yaml` (also `python -m meepsquared train job.yaml`) plans, trains and saves the adapter in the job's output folder.
+The command `meepsquared train job.yaml` (also `python -m meepsquared train job.yaml`) plans, trains and saves the adapter in the job's output folder. `meepsquared preprocess job.yaml --cache <dir> [--json]` preprocesses the job's data into `<dir>/<key>/` and trains nothing; `--json` prints the outcome.
 
 [cols="1,3",options="header"]
 |===

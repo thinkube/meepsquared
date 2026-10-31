@@ -97,6 +97,7 @@ meepsquared train job.yaml --plan-only   # print the plan and stop
 meepsquared train job.yaml               # print the plan, train, and save the adapter
 meepsquared train job.yaml --status-file status.json --stop-file STOP [--resume]
                                     # train in sessions: stop with a checkpoint when STOP exists
+meepsquared preprocess job.yaml --cache preprocessed   # tokenize, check and cut the data once, keyed by its inputs
                                     # (exit code 75), and resume exactly where it stopped
 ```
 

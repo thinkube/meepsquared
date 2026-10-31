@@ -69,7 +69,14 @@ def _cut(example: dict, max_length: int) -> dict:
             for key, value in example.items()}
 
 
-ROPE_KEPT = "liger_kernel_config keeps Liger's rotary embedding, which writes over the outputs a selective layer keeps"
+def _cut_batch(batch: dict, max_length: int) -> dict:
+    """_cut over a batch of tokenized examples (columns of values), as a batched datasets.map takes it."""
+    names = list(batch.keys())
+    rows = [_cut(dict(zip(names, values)), max_length) for values in zip(*(batch[name] for name in names))]
+    return {name: [row[name] for row in rows] for name in names}
+
+
+ROPE_KEPT ="liger_kernel_config keeps Liger's rotary embedding, which writes over the outputs a selective layer keeps"
 
 
 def _rope_off_for_selective(args, given) -> None:

@@ -153,9 +153,15 @@ Milestones run on one process.
 
 Measured on Qwen3.6-35B-A3B on a DGX Spark in FP8: vLLM answers 400 FLORES+ sentences about twice as fast as `model.generate`, and the training's steps are about a third slower beside it, as less memory is left for activations. In BF16 the training does not fit beside vLLM on that machine.
 
+== Preprocessing
+
+For SFT, the data is tokenized, checked and cut once, into a folder of Arrow files, and the plan and the training read that folder memory-mapped: they hold no copy of the data in Python objects, which on a GPU that shares the system's memory (xref:unified-memory.adoc[]) would take the memory the training needs, and a dataset of millions of rows is tokenized once. `job.preprocess(cache_dir)` (the command `meepsquared preprocess job.yaml --cache <dir>`) writes `<cache_dir>/<key>/`: `train/` and `eval/` (the tokens as TRL's trainer takes them, with each row's place in the data, its origin kind and its length), `report.json` (the data checks below, the row counts, the held-out share) and `key.json`. It runs in passes over chunks of rows, on the cores the process may use (its CPU affinity within its cgroup's quota), with TRL's own tokenization called without a trainer, so the tokens are exactly the trainer's; a pass keeps per row a length, a few booleans and a 16-byte hash. Its memory does not grow with the dataset.
+
+The key is the hash of every input the result depends on: the data (a file by its bytes, a loaded dataset by its fingerprint), the evaluation data, the tokenizer as loaded (its vocabulary and merges, chat template and special tokens), `max_length`, where the loss counts (the answers, the completions, every token, and Meep²'s turn markers), `eval_share` and the seed, and the versions of Meep², TRL, Transformers, tokenizers and datasets. `preprocess` finds a folder made before from the same inputs and says so; it never reuses one of other inputs. A job with `preprocessed=<folder>` reads that folder after checking that its own inputs make the same key, and refuses it otherwise, naming the inputs that differ. A job without `preprocessed` preprocesses first, into `<output>/preprocessed/`, with the same code; on a machine with a GPU that shares the system's memory, preprocess apart, on a machine with cores, and give the folder.
+
 == Data checks
 
-For SFT, the plan checks the data with the model's tokenizer and chat template, after TRL has tokenized it. TRL tokenizes it whole, without cutting; Meep² then cuts each example to `max_length`, keeping its start, as TRL would.
+The data is checked as it is preprocessed, with the model's tokenizer and chat template, after TRL has tokenized it. TRL tokenizes it whole, without cutting; Meep² then cuts each example to `max_length`, keeping its start, as TRL would. The plan's `data checks` line is the report of the preprocessing.
 
 ----
   data checks  9,500 rows render; 61 longer than 1024 tokens, 12 of them with answer tokens cut; 3 without answer tokens, left out; no evaluation example is a training example; 20% of the training rows synthetic
@@ -167,7 +173,7 @@ Length:: The examples longer than `max_length`, and those of them whose answer t
 
 No answer:: An example whose loss counts no token (with the loss on the answers, one without an answer) trains nothing and costs a forward pass. It is left out of the training and the evaluation, and reported.
 
-Overlap:: An evaluation example that is a training example is refused. The match is on the rendered text, normalized (Unicode NFKC, case folded, white space collapsed), and on the `_row` id when both sets have a `_row` column. With `eval_share`, rows repeated in the data are caught too.
+Overlap:: An evaluation example that is a training example is refused. The match is on the rendered text, normalized (Unicode NFKC, case folded, white space collapsed) and hashed (16 bytes a row), and on the `_row` id when both sets have a `_row` column. With `eval_share`, rows repeated in the data are caught too.
 
 Origin:: The Datasets extension marks each row's origin in an `_origin` column: a mapping whose `kind` is `"real"` or `"synthetic"` (with the method and model that made it). The plan states the share of synthetic training rows. A synthetic evaluation row is refused: an evaluation is on real data. `eval_share` holds its rows out of the real rows. A row whose `_origin` has no kind is refused.
 
