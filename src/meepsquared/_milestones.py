@@ -54,6 +54,10 @@ LOOP_MIN_REPEATS = 4
 BATCH = 16
 FOLDER = "milestones"
 GROUP = "all"
+# At the first milestone a shared vLLM answers, this many rows, spread over the set, are answered by model.generate
+# too, and each group's scores of the two must be within GUARD_BOUND of each other
+GUARD_ROWS = 64
+GUARD_BOUND = 0.5
 
 
 def steps(planned: int, share: float) -> list:
@@ -314,6 +318,31 @@ def score(scorer: Callable, found: list, answers: list) -> dict:
     return scores
 
 
+def guard(model, tokenizer, found: list, answers: list, scorer: Callable, size: int = BATCH) -> dict:
+    """The guard of a shared vLLM's first milestone: GUARD_ROWS rows spread over `found`, answered by model.generate
+    with the same adapter, scored beside vLLM's answers (`answers`) group by group; a metric of a group more than
+    GUARD_BOUND apart stops the training. Returns {group: {metric: {"vllm", "generate", "difference"}}}."""
+    from meepsquared import _shared_vllm
+
+    step = max(1, -(-len(found) // GUARD_ROWS))
+    picked = list(range(0, len(found), step))[:GUARD_ROWS]
+    sample = [found[i] for i in picked]
+    theirs = score(scorer, sample, [answers[i] for i in picked])
+    mine = score(scorer, sample, generate(model, tokenizer, sample, size))
+    compared, failed = {}, []
+    for group in theirs:
+        compared[group] = {metric: {"vllm": theirs[group][metric], "generate": mine[group][metric],
+                                    "difference": abs(theirs[group][metric] - mine[group][metric])}
+                           for metric in theirs[group]}
+        failed += [f"{group} {metric} {c['vllm']:.2f} by vLLM, {c['generate']:.2f} by model.generate"
+                   for metric, c in compared[group].items() if c["difference"] > GUARD_BOUND]
+    if failed:
+        raise _shared_vllm.SharedError(f"the shared vLLM's answers score apart from model.generate's on "
+                                       f"{len(sample)} rows with the same adapter, more than {GUARD_BOUND}: "
+                                       + "; ".join(failed))
+    return compared
+
+
 class Milestones(TrainerCallback):
     """At the end of each milestone's step: the adapter saved apart and, with an evaluation, the model's answers
     scored and logged. A milestone finished in an earlier session is not made again."""
@@ -324,9 +353,11 @@ class Milestones(TrainerCallback):
         self.found, self.scorer, self.size = found, scorer, size
         self.status, self.report = status, report
         self.seconds = None
-        # A shared vLLM answers instead of model.generate; its stacks' checksum at the start, checked once
+        # A shared vLLM answers instead of model.generate; its stacks' checksum at the start, checked once, and
+        # at its first milestone its answers against model.generate's on a sample (guard)
         self.engine = engine
         self.checksum = engine.checksum() if engine is not None else None
+        self.guarded = engine is None
 
     def records(self) -> list:
         return [record for record in (done(self.output, step) for step in sorted(self.at)) if record is not None]
@@ -375,6 +406,9 @@ class Milestones(TrainerCallback):
                     raise _shared_vllm.SharedError(f"the shared expert stacks changed during training: their sum was "
                                                    f"{self.checksum!r} at the start and is {now!r}")
                 self.checksum = None
+            if not self.guarded:
+                record["guard"] = guard(model, tokenizer, self.found, answers, self.scorer, self.size)
+                self.guarded = True
         elif self.found is not None:
             answers = generate(model, tokenizer, self.found, self.size)
         if self.found is not None:

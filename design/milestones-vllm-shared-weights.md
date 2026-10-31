@@ -232,6 +232,29 @@ need to transpose"). The two layouts are the same.
 
 ### 6.1 The correctness check (runs at setup, every job)
 
+What decides, in this order:
+
+1. At setup: every shared stack's storage identity with vLLM (requirement
+   3), and the comparison of the current adapter below.
+2. At every milestone: the stacks' checksum, unchanged since setup
+   (requirement 4).
+3. At the first milestone: the guard on real answers. 64 of the milestone's
+   rows, spread over the set, are answered by `model.generate` with the
+   same trained adapter beside vLLM's answers, and each group is scored
+   twice; a metric of a group more than 0.5 apart stops the job with the
+   figures. Both figures go in the milestone's record (`guard`), which
+   Forge shows as the run's progress.
+
+Why the log-probabilities alone do not decide: vLLM's Triton FP8 experts
+quantize each token's input to FP8 (W8A8; in vLLM 0.22.1's
+`fused_moe/oracle/fp8.py` only Marlin and the CPU use the W8A16 config, and
+Marlin repacks the weights, so it cannot share them), while Meep²'s
+trainer computes the experts on 16-bit inputs (W8A16). The two engines
+differ systematically in the experts, and an adapter amplifies the
+difference: with a random adapter of effect 5 the top token's
+log-probability differed by 0.30 to 0.62 from run to run, while chrF of
+the same adapter's translations differed by 0.07 to 0.14.
+
 On 8 fixed prompts from the evaluation set, with the current adapter (the
 initial one at setup):
 
@@ -249,12 +272,12 @@ initial one at setup):
 - Fail: the job stops with the numbers.
 
 At setup a fresh LoRA's B is zero, so the adapter changes nothing and the
-check above cannot detect a wrong adapter layout. The check must therefore
-also run once with an adapter whose A and B are random and nonzero, saved
-and loaded through the same path. Its bound on the top token's
-log-probability is the larger of 0.5 and a tenth of the adapter's effect
-(measured 0.30 to 0.38 with an effect of 5.1); a wrong layout errs by about
-the effect itself and changes the top token.
+comparison above cannot detect a wrong adapter layout. The comparison also
+runs with an adapter whose A and B are random and nonzero, saved and loaded
+through the same path, and its figures are written to the plan and the
+log, with no bound: a wrong layout errs by about the effect itself and
+changes the top token, which the first milestone's guard then catches on
+real answers.
 
 ## 7. Acceptance on tkspark
 
