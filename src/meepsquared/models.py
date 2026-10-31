@@ -238,6 +238,21 @@ def _fused_wanted(model) -> tuple[bool, str]:
     return True, ""
 
 
+def _adapters_off_fp8(peft_model) -> int:
+    """The adapters PEFT made in FP8, on expert stacks a shared vLLM already holds as FP8 (meepsquared._shared_vllm),
+    put in the dtype of the other adapters: an adapter trains in 16 or 32 bits, and an 8-bit optimizer's step on an
+    FP8 one is NaN. Returns how many."""
+    adapters = [p for n, p in peft_model.named_parameters() if "lora_" in n]
+    fp8 = [p for p in adapters if p.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)]
+    if not fp8:
+        return 0
+    others = [p for p in adapters if p not in fp8]
+    dtype = others[0].dtype if others else torch.float32
+    for p in fp8:
+        p.data = p.data.to(dtype)
+    return len(fp8)
+
+
 class MeepLanguageModel:
     @staticmethod
     def from_pretrained(
@@ -361,10 +376,21 @@ class MeepLanguageModel:
                          "attention_auto": (attention_auto, attention_why)}
         model._meepsquared["allocator_cap"] = allocator_cap
         if shared_vllm is not None:
+            if shared:
+                # vLLM loads beside the trainer, with the headroom a training keeps (see recap_allocator)
+                allocator_cap = _unified_memory.recap_allocator(gpu_index)
             # Last: once vLLM is imported, Transformers' configuration classes are vLLM's
             engine = _shared_vllm.Engine(model_name, dtype, load_in_fp8, device=torch.device(f"cuda:{gpu_index}"),
                                          **shared_vllm)
             engine.attach(model)
+            found = engine.share_equal(model)
+            engine.memory["shared_other"] = found["shared"]
+            engine.kept = found["kept"]
+            if shared:
+                # vLLM took its memory after the cap was set, some of it outside PyTorch's allocator
+                allocator_cap = _unified_memory.recap_allocator(gpu_index)
+                model._meepsquared["allocator_cap"] = allocator_cap
+                engine.memory["allocator_cap"] = allocator_cap
             _shared_vllm.log(engine.memory, "started")
             model._meepsquared["engine"] = engine
         dtype_name = str(dtype).removeprefix("torch.")
@@ -441,6 +467,7 @@ class MeepLanguageModel:
         # the dtype every layer computes in
         model.config.use_cache = False
         peft_model = get_peft_model(model, config)
+        _adapters_off_fp8(peft_model)
         peft_model._meepsquared_gradient_checkpointing = use_gradient_checkpointing
         peft_model._meepsquared_compile_layers = bool(compile_layers)
         if use_gradient_checkpointing == "selective":

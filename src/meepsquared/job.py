@@ -997,9 +997,12 @@ class TrainingJob:
                    + _milestones.budget(tokenizer, row) for row in rows]
         rank = self.recipe.rank if self.recipe.rank is not None else RANK
         config = AutoConfig.from_pretrained(self.model)
+        sequences = min(len(rows), _shared_vllm.MAX_SEQUENCES)
+        longest = max(lengths) + 16
+        tokens = min(sum(lengths), sequences * longest)
         return {"max_lora_rank": max(8, 1 << (rank - 1).bit_length()),
-                "kv_cache_bytes": _shared_vllm.kv_cache_bytes(config, sum(lengths)),
-                "max_model_len": max(lengths) + 16}
+                "kv_cache_bytes": _shared_vllm.kv_cache_bytes(config, tokens, sequences),
+                "max_model_len": longest, "max_num_seqs": sequences}
 
     def _output(self, model) -> str:
         if self.output is not None:
@@ -1388,7 +1391,9 @@ class TrainingJob:
             shared_gib = engine.memory["shared_stacks"] / 2**30
             decisions.append(Decision(
                 "milestone_engine", "milestones by", "vllm",
-                f"vLLM in this process, the {shared_gib:.1f} GiB of expert stacks held once",
+                f"vLLM in this process, the {shared_gib:.1f} GiB of expert stacks held once, and "
+                f"{engine.memory['shared_other'] / 2**30:.1f} GiB of the other weights ({len(engine.kept)} kept apart: "
+                "they differ in vLLM)",
                 f"overrides.milestone_engine; memory before vLLM {engine.memory['before_vllm'] / 2**30:.1f} GiB, "
                 f"after {engine.memory['after_vllm'] / 2**30:.1f} GiB, peak while loading "
                 f"{engine.memory['loading_peak'] / 2**30:.1f} GiB; the check on {len(check_prompts)} rows: "

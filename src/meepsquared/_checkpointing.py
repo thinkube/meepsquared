@@ -43,6 +43,10 @@ from meepsquared import _selective
 
 # The share of the GPU's memory "auto" leaves unused by activations
 MARGIN = 0.15
+# On a GPU that shares the system's memory the margin is a share of the memory free for the training, and at least
+# this: a step's own buffers do not shrink with it (a step of Qwen3.6-35B-A3B in BF16 took 2.5 GiB over its
+# measurement with 10 GiB free)
+MARGIN_MIN_SHARED = 4 * 2**30
 # The settings that measure: "auto", and Unsloth's name for its own checkpointing
 AUTO = ("auto", "unsloth")
 # The three ways a layer trains, as the measurements name them
@@ -387,7 +391,8 @@ def margin(device, free: int, total: int) -> int:
     """The bytes kept free for the loss, the optimizer's step and the passes' own buffers, out of `free`.
 
     MARGIN of the GPU's memory (`total`). On a GPU that shares the system's
-    memory, MARGIN of the memory free for the training (`free`): there the
+    memory, MARGIN of the memory free for the training (`free`), and at least
+    MARGIN_MIN_SHARED: there the
     GPU's memory is the machine's, and the operating system, the page cache
     and the other processes hold much of it, which the allocator's cap
     already keeps from this process (meepsquared._unified_memory). The timed
@@ -396,7 +401,7 @@ def margin(device, free: int, total: int) -> int:
     from meepsquared import _unified_memory
 
     if device.type == "cuda" and _unified_memory.shares_system_memory(device.index or 0):
-        return int(MARGIN * free)
+        return max(int(MARGIN * free), MARGIN_MIN_SHARED)
     return int(MARGIN * total)
 
 

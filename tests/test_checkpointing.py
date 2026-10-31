@@ -123,4 +123,5 @@ def test_the_margin_is_a_share_of_the_gpus_memory_or_on_shared_memory_of_whats_f
     # On a GB10 the GPU's total is the machine's memory; the margin is a share of what is free for the training
     monkeypatch.setattr(_unified_memory, "shares_system_memory", lambda device=0: True)
     assert _checkpointing.margin(torch.device("cuda", 0), 30 * gib, 122 * gib) == int(_checkpointing.MARGIN * 30 * gib)
+    assert _checkpointing.margin(torch.device("cuda", 0), 10 * gib, 122 * gib) == _checkpointing.MARGIN_MIN_SHARED
 

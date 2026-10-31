@@ -147,6 +147,12 @@ The plan:: The `milestones` line gives the steps. On a GPU, the plan generates t
 
 Milestones run on one process.
 
+=== Milestones through vLLM
+
+`Overrides(milestone_engine="vllm")` answers the evaluation with vLLM inside the training process, which holds the model's routed expert stacks once for both, and shares every other weight that is equal in both; the trainer's tensors are vLLM's. The qwen3_5_moe family, with LoRA or FP8; one GPU. On start, and in every job, the trainer and vLLM are compared on the first answer token of the evaluation's first rows, with the current adapter and with a random one saved and loaded the same way; a difference stops the job. The plan's `milestones by` line gives the memory before and after vLLM, the peak while loading, and the check's figures. See `meepsquared._shared_vllm` and `design/milestones-vllm-shared-weights.md`.
+
+Measured on Qwen3.6-35B-A3B on a DGX Spark in FP8: vLLM answers 400 FLORES+ sentences about twice as fast as `model.generate`, and the training's steps are about a third slower beside it, as less memory is left for activations. In BF16 the training does not fit beside vLLM on that machine.
+
 == Data checks
 
 For SFT, the plan checks the data with the model's tokenizer and chat template, after TRL has tokenized it. TRL tokenizes it whole, without cutting; Meep² then cuts each example to `max_length`, keeping its start, as TRL would.

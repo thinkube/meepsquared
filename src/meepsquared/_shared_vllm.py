@@ -52,6 +52,9 @@ ARCHITECTURES = ("Qwen3_5MoeForConditionalGeneration",)
 CHECKPOINT_STACKS = (".mlp.experts.gate_up_proj", ".mlp.experts.down_proj")
 MODEL_STACKS = {"gate_up_proj": "w13_weight", "down_proj": "w2_weight"}
 LOGPROBS = 20
+# The sequences vLLM answers at once: each holds its linear-attention state, about 60 MiB on Qwen3.6-35B-A3B; 16
+# answer FLORES+'s 400 sentences in about a minute, and leave the training the memory it needs beside vLLM
+MAX_SEQUENCES = 16
 
 
 class SharedError(RuntimeError):
@@ -129,11 +132,76 @@ def _gib(n) -> str:
     return f"{n / 2**30:.2f} GiB"
 
 
+def _lora_on_dequantized_inputs() -> None:
+    """vLLM 0.22's Triton experts give their w13 LoRA the FP8 hidden states the base product reads (the w2 LoRA reads
+    the unquantized intermediate), and Triton has no product of FP8 by the adapter's 16 bits. The w13 LoRA gets them
+    back in the adapter's dtype, dequantized with the scale the base product used: the adapter then computes on the
+    input the base product sees."""
+    import inspect
+
+    import vllm
+    from vllm.model_executor.layers.fused_moe.experts import triton_moe
+
+    if not vllm.__version__.startswith("0.22"):
+        raise SharedError(f"FP8 milestones through vLLM are built on vLLM 0.22's Triton experts; this is "
+                          f"{vllm.__version__}")
+    cls = triton_moe.TritonExperts
+    if getattr(cls, "_meepsquared_dequantized_lora", False):
+        return
+    real_apply, real_w13 = cls.apply, cls.apply_w13_lora
+    signature = inspect.signature(real_apply)
+
+    def apply(self, *args, **kwargs):
+        self._meepsquared_a1q_scale = signature.bind(self, *args, **kwargs).arguments.get("a1q_scale")
+        try:
+            return real_apply(self, *args, **kwargs)
+        finally:
+            self._meepsquared_a1q_scale = None
+
+    def apply_w13_lora(self, lora_context, *, x, **kwargs):
+        if x.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+            scale = getattr(self, "_meepsquared_a1q_scale", None)
+            if scale is None:
+                scale = self.a1_scale
+            if scale is None:
+                raise SharedError("the adapter is refused: vLLM's FP8 experts give the LoRA FP8 inputs without a scale")
+            if scale.numel() == 1:
+                scale = scale.reshape(())
+            elif scale.dim() == 2 and scale.shape == (x.shape[0], 1):
+                pass
+            else:
+                raise SharedError(f"the adapter is refused: vLLM's FP8 experts scale their inputs in blocks "
+                                  f"{tuple(scale.shape)}, which meepsquared does not dequantize for the LoRA")
+            dtype = lora_context.w13_lora_a_stacked[0].dtype
+            x = (x.float() * scale.float()).to(dtype).contiguous()
+        return real_w13(self, lora_context, x=x, **kwargs)
+
+    cls.apply, cls.apply_w13_lora = apply, apply_w13_lora
+    cls._meepsquared_dequantized_lora = True
+
+
+class _DefaultStreamAfter:
+    """While inside, vLLM runs; on exit the default CUDA stream is the process's current stream again. vLLM leaves
+    a stream of its own current, and bitsandbytes' optimizers launch on the default stream whatever is current:
+    the step then races the gradients and writes NaN."""
+
+    def __init__(self, device):
+        self.device = device
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        torch.cuda.synchronize(self.device)
+        torch.cuda.set_stream(torch.cuda.default_stream(self.device))
+        return False
+
+
 class Engine:
     """vLLM in this process on the checkpoint at `model_name`, its expert stacks the trainer's."""
 
     def __init__(self, model_name: str, dtype: torch.dtype, fp8: bool, max_lora_rank: int, kv_cache_bytes: int,
-                 max_model_len: int, device: torch.device):
+                 max_model_len: int, max_num_seqs: int, device: torch.device):
         os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
         try:
             from vllm import LLM
@@ -155,17 +223,29 @@ class Engine:
                 read.append(f)
                 yield from tensors.items()
                 del tensors
+                # The shard's tensors go back to the system, not to PyTorch's cache: on a GPU that shares the
+                # system's memory the cache keeps them from the machine, and shards of other sizes reuse little of it
+                torch.cuda.empty_cache()
 
+        if fp8:
+            _lora_on_dequantized_inputs()
         real = default_loader.safetensors_weights_iterator
         default_loader.safetensors_weights_iterator = shard_by_shard
+        # With the cache given in bytes vLLM sizes nothing from gpu_memory_utilization, but refuses to start when
+        # less than that share of the GPU is free; the trainer already holds its share, so the share free now is given
+        free, total = torch.cuda.mem_get_info(device)
         kwargs = dict(model=model_name, dtype=str(dtype).removeprefix("torch."), enable_lora=True,
                       max_lora_rank=max_lora_rank, max_loras=1, enforce_eager=True,
                       kv_cache_memory_bytes=int(kv_cache_bytes), max_model_len=int(max_model_len),
-                      language_model_only=True, seed=0)
+                      language_model_only=True, seed=0, gpu_memory_utilization=round(0.98 * free / total, 4),
+                      # Each sequence holds the linear-attention layers' state (about 60 MiB on Qwen3.6-35B-A3B): as
+                      # many as the cache was sized for, and prefill in chunks of one sequence's length
+                      max_num_seqs=int(max_num_seqs), max_num_batched_tokens=max(int(max_model_len), 2048))
         if fp8:
             kwargs.update(quantization="fp8", kernel_config={"moe_backend": "triton"})
         try:
-            self.llm = LLM(**kwargs)
+            with _DefaultStreamAfter(device):
+                self.llm = LLM(**kwargs)
         except Exception as e:
             raise SharedError(f"milestone_engine='vllm': vLLM did not start: {type(e).__name__}: {e}") from e
         finally:
@@ -220,6 +300,48 @@ class Engine:
                                            for k, t in s.items() if not k.endswith("_scale"))
         return len(layers)
 
+    # Transformers' weights that vLLM fuses into one, in the order of its rows
+    FUSED = {"q_proj": ("qkv_proj", 0), "k_proj": ("qkv_proj", 1), "v_proj": ("qkv_proj", 2),
+             "in_proj_qkv": ("in_proj_qkvz", 0), "in_proj_z": ("in_proj_qkvz", 1),
+             "in_proj_b": ("in_proj_ba", 0), "in_proj_a": ("in_proj_ba", 1),
+             "gate_proj": ("gate_up_proj", 0), "up_proj": ("gate_up_proj", 1)}
+
+    def share_equal(self, model) -> dict:
+        """Every other frozen weight of the trainer that equals vLLM's, whole or as a block of rows of a weight vLLM
+        fuses, becomes a view of vLLM's tensor, and the trainer's copy is freed. Equality, checked on every weight,
+        is what shows that a view holds the trainer's weight; a weight that differs, in value, shape or dtype (FP8
+        in vLLM), stays the trainer's own. Returns {"shared": bytes, "kept": [names]}."""
+        theirs = {}
+        for name, tensor in self.params.items():
+            key = name.removeprefix("language_model.").replace(".base_layer.", ".")
+            # vLLM's weights are its own Parameter subclasses; their data is the same storage, as a plain tensor
+            theirs[key] = tensor.data
+        shared, kept = 0, []
+        modules = dict(model.named_modules())
+        for name, param in list(model.named_parameters()):
+            if param.is_meta or name.endswith(tuple(MODEL_STACKS)):
+                continue
+            owner, _, leaf = name.rpartition(".")
+            parent, _, module_name = owner.rpartition(".")
+            view = theirs.get(name)
+            if view is None and module_name in self.FUSED and leaf == "weight":
+                fused, part = self.FUSED[module_name]
+                whole = theirs.get(f"{parent}.{fused}.weight")
+                if whole is not None:
+                    sizes = [getattr(modules.get(f"{parent}.{m}"), "weight", None)
+                             for m, (f, _) in sorted(self.FUSED.items(), key=lambda kv: kv[1][1]) if f == fused]
+                    if all(s is not None for s in sizes) and sum(s.shape[0] for s in sizes) == whole.shape[0]:
+                        start = sum(s.shape[0] for s in sizes[:part])
+                        view = whole[start:start + param.shape[0]]
+            if (view is None or view.shape != param.shape or view.dtype != param.dtype
+                    or not torch.equal(view, param.detach())):
+                kept.append(name)
+                continue
+            setattr(modules[owner], leaf, torch.nn.Parameter(view, requires_grad=param.requires_grad))
+            shared += param.numel() * param.element_size()
+        torch.cuda.empty_cache()
+        return {"shared": shared, "kept": kept}
+
     def check_shared(self, model) -> None:
         """Every layer's stacks in the trainer and in vLLM use the same storage; raises otherwise."""
         for i, layer in enumerate(_decoder_layers(model)):
@@ -254,8 +376,9 @@ class Engine:
                   for cap in caps]
         request = self._lora(adapter_dir)
         try:
-            out = self.llm.generate([TokensPrompt(prompt_token_ids=p) for p in prompts], params, lora_request=request,
-                                    use_tqdm=False)
+            with _DefaultStreamAfter(self.device):
+                out = self.llm.generate([TokensPrompt(prompt_token_ids=p) for p in prompts], params,
+                                        lora_request=request, use_tqdm=False)
         except Exception as e:
             raise SharedError(f"vLLM did not generate: {type(e).__name__}: {e}") from e
         return [list(o.outputs[0].token_ids) for o in out]
@@ -266,9 +389,11 @@ class Engine:
 
         request = self._lora(adapter_dir)
         try:
-            out = self.llm.generate([TokensPrompt(prompt_token_ids=p) for p in prompts],
-                                    SamplingParams(temperature=0, max_tokens=1, logprobs=LOGPROBS, detokenize=False),
-                                    lora_request=request, use_tqdm=False)
+            with _DefaultStreamAfter(self.device):
+                out = self.llm.generate([TokensPrompt(prompt_token_ids=p) for p in prompts],
+                                        SamplingParams(temperature=0, max_tokens=1, logprobs=LOGPROBS,
+                                                       detokenize=False),
+                                        lora_request=request, use_tqdm=False)
         except Exception as e:
             raise SharedError(f"the adapter is refused: vLLM did not answer with it: {type(e).__name__}: {e}") from e
         return [{t: lp.logprob for t, lp in o.outputs[0].logprobs[0].items()} for o in out]
@@ -318,13 +443,22 @@ def _base_experts(experts):
     return experts
 
 
-def kv_cache_bytes(config, tokens: int) -> int:
-    """The KV cache of `tokens` tokens of the model's full-attention layers, in the model's dtype, with half as much
-    again for vLLM's blocks of the linear-attention layers' state."""
+def kv_cache_bytes(config, tokens: int, sequences: int) -> int:
+    """vLLM's cache for `sequences` sequences of `tokens` tokens in all: the full-attention layers' keys and values in
+    16 bits per token, and each sequence's linear-attention state (its recurrent state in the config's
+    mamba_ssm_dtype, and its convolution's last inputs in 16 bits) per linear layer; a quarter more for vLLM's
+    blocks."""
     text = getattr(config, "text_config", config)
     full = sum(1 for t in text.layer_types if t == "full_attention")
+    linear = sum(1 for t in text.layer_types if t == "linear_attention")
     per_token = full * 2 * text.num_key_value_heads * text.head_dim * 2
-    return int(tokens * per_token * 1.5)
+    state_bytes = 4 if str(getattr(text, "mamba_ssm_dtype", "float32")) == "float32" else 2
+    recurrent = text.linear_num_value_heads * text.linear_key_head_dim * text.linear_value_head_dim * state_bytes
+    conv_dim = (2 * text.linear_num_key_heads * text.linear_key_head_dim
+                + text.linear_num_value_heads * text.linear_value_head_dim)
+    convolution = conv_dim * (text.linear_conv_kernel_dim - 1) * 2
+    per_sequence = linear * (recurrent + convolution)
+    return int((tokens * per_token + sequences * per_sequence) * 1.25)
 
 
 def trainer_logprobs(model, prompts: list, ends: Optional[set] = None) -> list:
@@ -342,25 +476,39 @@ def trainer_logprobs(model, prompts: list, ends: Optional[set] = None) -> list:
 
 
 def compare(trainer: list, vllm: list) -> dict:
-    """The check: the same top token for every prompt, and the largest difference of log-probability over the tokens
-    vLLM ranks first. Two top tokens that differ are a tie, not a difference, when the trainer gives vLLM's within
-    LOGPROB_BOUND of its own: rounding decides between them."""
-    worst, top_same, ties = 0.0, True, 0
+    """The check: the top token vLLM chooses, and its log-probability from the trainer against vLLM's.
+
+    Two implementations of a mixture of experts in 16 bits route some tokens to other experts, which moves the
+    unlikely tokens' log-probabilities by as much as 1 to 4 (measured on Qwen3.6-35B-A3B), and leaves the likely
+    ones within TOP_BOUND: the top token is what a greedy answer reads. Two top tokens that differ are a tie when
+    either side ranks the two within TOP_BOUND of each other; the top token's log-probability is compared where the
+    two sides choose the same."""
+    top_same, ties, top_diff, tail = True, 0, 0.0, 0.0
     for mine, theirs in zip(trainer, vllm):
         best = max(theirs, key=theirs.get)
-        if int(mine.argmax()) != best:
-            if float(mine.max() - mine[best]) <= LOGPROB_BOUND:
-                ties += 1
-            else:
-                top_same = False
-        worst = max(worst, max(abs(float(mine[t]) - lp) for t, lp in theirs.items()))
-    return {"top_same": top_same, "ties": ties, "max_logprob_diff": worst}
+        tail = max(tail, max(abs(float(mine[t]) - lp) for t, lp in theirs.items()))
+        own = int(mine.argmax())
+        if own == best:
+            top_diff = max(top_diff, abs(float(mine[best]) - theirs[best]))
+            continue
+        # A tie: the token each side ranks first is the other's second, at most TOP_BOUND behind on one side
+        mine_margin = float(mine[own] - mine[best])
+        theirs_margin = theirs[best] - theirs[own] if own in theirs else float("inf")
+        if min(mine_margin, theirs_margin) <= TOP_BOUND:
+            ties += 1
+        else:
+            top_same = False
+    return {"top_same": top_same, "ties": ties, "top_diff": top_diff, "tail_diff": tail}
 
 
-# The check's bound on the difference of log-probability between the trainer and vLLM, over the tokens vLLM ranks
-# first, measured on Qwen3.6-35B-A3B (see design/milestones-vllm-shared-weights.md); and the spread of the random
-# adapter's A and B, which must change the model's answer by more than the bound for the check to test anything
-LOGPROB_BOUND = 0.25
+# The check's bound on the difference of the top token's log-probability between the trainer and vLLM: at most 0.16
+# measured on Qwen3.6-35B-A3B in BF16, with the adapter's B zero and with meepsquared's training kernels; and the
+# spread of the random adapter's A and B, which must move the trainer's log-probabilities by more than twice the
+# bound for the check to test the adapter
+TOP_BOUND = 0.3
+# With the random adapter, which moves the output by about 5, the two sides' rounding grows with it: at most this
+# share of its effect (0.30 with an effect of 5.29, 5.7%, measured); a wrong layout errs by about the effect itself
+RANDOM_SHARE = 0.1
 RANDOM_STD = 0.02
 CHECK_PROMPTS = 8
 
@@ -405,22 +553,26 @@ def correctness(engine, model, tokenizer, prompts: list) -> dict:
                 base = mine
             result["effect"] = max(float((m - b).abs().max()) for m, b in zip(mine, base))
             found[label] = result
-    failed = [label for label, r in found.items() if not r["top_same"] or r["max_logprob_diff"] > LOGPROB_BOUND]
-    if found["random"]["effect"] <= LOGPROB_BOUND:
+    for label, r in found.items():
+        r["bound"] = TOP_BOUND if label == "current" else max(TOP_BOUND, RANDOM_SHARE * r["effect"])
+    failed = [label for label, r in found.items() if not r["top_same"] or r["top_diff"] > r["bound"]]
+    if found["random"]["effect"] <= 2 * TOP_BOUND:
         raise SharedError(f"the check of the adapter tests nothing: the random adapter changed the trainer's "
-                          f"log-probabilities by {found['random']['effect']:.3f}, not more than the bound "
-                          f"{LOGPROB_BOUND}")
+                          f"log-probabilities by {found['random']['effect']:.3f}, not more than twice the bound "
+                          f"{TOP_BOUND}")
     if failed:
         raise SharedError("the check of §6.1 failed: vLLM and the trainer differ with the "
                           + " and the ".join(f"{label} adapter ({_figures(found[label])})" for label in failed)
-                          + f"; the bound is {LOGPROB_BOUND} of log-probability and the same top token")
+                          + "; the bound is the same top token and its log-probability within the bound given")
     return found
 
 
 def _figures(result: dict) -> str:
     return (f"top token {'the same' if result['top_same'] else 'different'}"
-            + (f" ({result['ties']} ties)" if result.get("ties") else "") + ", largest difference "
-            f"{result['max_logprob_diff']:.4f}, the adapter's effect {result['effect']:.3f}")
+            + (f" ({result['ties']} ties)" if result.get("ties") else "")
+            + f", its log-probability within {result['top_diff']:.3f} (the top 20 within {result['tail_diff']:.2f}), "
+            f"the adapter's effect {result['effect']:.3f}"
+            + (f", the bound {result['bound']:.3f}" if "bound" in result else ""))
 
 
 def check_text(found: dict) -> str:

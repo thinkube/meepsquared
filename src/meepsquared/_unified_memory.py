@@ -51,6 +51,21 @@ def allocator_cap(available: int, total: int) -> int:
     return cap
 
 
+def recap_allocator(device: int = 0) -> int:
+    """Cap PyTorch's allocator again, at what this process holds now plus what the system has available less the
+    headroom: after something else in the process (a shared vLLM) has taken memory, outside the allocator too, the cap
+    set before it would let the process take more than the machine has left. Returns the cap in bytes."""
+    import torch
+
+    total = torch.cuda.get_device_properties(device).total_memory
+    held = torch.cuda.memory_reserved(device)
+    # Three times the headroom: the training's own host memory still grows after loading by 10 GiB and more on
+    # Qwen3.6-35B-A3B (its data, its loader, its kernels' compilation)
+    cap = min(held + allocator_cap(available_memory() - 2 * HEADROOM, total), total)
+    torch.cuda.set_per_process_memory_fraction(cap / total, device)
+    return cap
+
+
 def cap_allocator(device: int = 0) -> int:
     """Cap PyTorch's allocator on a GPU that shares the system's memory; returns the cap in bytes."""
     import torch

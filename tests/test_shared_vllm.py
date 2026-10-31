@@ -21,7 +21,7 @@ def test_the_check_takes_ties_at_rounding_as_the_same_top_token():
     # vLLM ranks token 1 first where the trainer ranks token 0 first, 0.1 apart: a tie at rounding
     theirs = [{1: float(mine[0][0]), 0: float(mine[0][1])}, {0: float(mine[1][0]) + 0.01, 1: float(mine[1][1])}]
     found = _shared_vllm.compare(mine, theirs)
-    assert found["top_same"] and found["ties"] == 1 and found["max_logprob_diff"] == pytest.approx(0.1, abs=1e-5)
+    assert found["top_same"] and found["ties"] == 1 and found["top_diff"] == pytest.approx(0.01, abs=1e-5)
     # A top token the trainer ranks far below its own is a difference
     assert not _shared_vllm.compare([mine[1]], [{1: 0.0, 0: -5.0}])["top_same"]
 
