@@ -22,7 +22,6 @@ import hashlib
 import json
 import os
 import shutil
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -329,13 +328,15 @@ class Building:
 def preprocess(job, cache_dir, cores: Optional[int] = None, say=print) -> Outcome:
     """The job's SFT data preprocessed into `<cache_dir>/<key>`: found there when made before with the same key,
     else built now. `say` is told what happens."""
-    from meepsquared import _sessions, _unified_memory, job as _job
+    from meepsquared import _unified_memory, job as _job
     from meepsquared.models import load_tokenizer
 
     if job.task != "sft":
         raise ValueError(f"preprocessing is for SFT's data; the job's task is {job.task!r}")
     if cores is None:
-        cores = _unified_memory.job_cores()
+        # Each process of a launch (torchrun) preprocesses, as TRL's trainer tokenizes in each: process 0 first,
+        # the others behind TRL's barrier, each on one core; preprocess ahead and give the folder to do it once
+        cores = 1 if int(os.environ.get("WORLD_SIZE", 1)) > 1 else _unified_memory.job_cores()
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     tokenizer = job.tokenizer if job.tokenizer is not None else load_tokenizer(job.model)
@@ -359,14 +360,6 @@ def preprocess(job, cache_dir, cores: Optional[int] = None, say=print) -> Outcom
                             else None, tokenizer, kind, answer_args, markers, max_length, job.eval_share)
         key = key_of(key_inputs)
         target = cache_dir / key
-        if not _sessions.main_process():
-            # Of several processes (a torchrun launch), process 0 preprocesses; the others wait for its folder
-            waited = 0
-            while not found(target, key_inputs):
-                if waited % 60 == 0:
-                    say(f"waiting for process 0 to preprocess the data into {target}")
-                time.sleep(1)
-                waited += 1
         if found(target, key_inputs):
             report = report_of(target)
             say(f"preprocessed data found in {target}: {report['decision']['text']}")
@@ -379,10 +372,13 @@ def preprocess(job, cache_dir, cores: Optional[int] = None, say=print) -> Outcom
         shutil.rmtree(building / CACHE_FOLDER)
         with open(building / KEY_FILE, "w") as f:
             json.dump(key_inputs, f, indent=2, sort_keys=True)
-        if found(target, key_inputs):
-            # Built meanwhile by another process from the same inputs
+        try:
+            building.rename(target)
+        except OSError:
+            if not found(target, key_inputs):
+                raise
+            # Built meanwhile by another process of a launch, from the same inputs
             return Outcome(str(target), key, True, report)
-        building.rename(target)
         say(f"preprocessed data built in {target}: {report['decision']['text']}")
         return Outcome(str(target), key, False, report)
     finally:
