@@ -238,12 +238,11 @@ What decides, in this order:
    3), and the comparison of the current adapter below.
 2. At every milestone: the stacks' checksum, unchanged since setup
    (requirement 4).
-3. At the first milestone: the guard on real answers. 64 of the milestone's
-   rows, spread over the set, are answered by `model.generate` with the
-   same trained adapter beside vLLM's answers, and each group is scored
-   twice; a metric of a group more than 0.5 apart stops the job with the
-   figures. Both figures go in the milestone's record (`guard`), which
-   Forge shows as the run's progress.
+
+The job runs no comparison of vLLM's answers with `model.generate`'s. That
+comparison is done outside the job, on the adapters the milestones save
+(for example the 2% and 4% adapters of a run paused there), because only a
+trained adapter can show a wrong layout: see the measurements below.
 
 Why the log-probabilities alone do not decide: vLLM's Triton FP8 experts
 quantize each token's input to FP8 (W8A8; in vLLM 0.22.1's
@@ -275,9 +274,18 @@ At setup a fresh LoRA's B is zero, so the adapter changes nothing and the
 comparison above cannot detect a wrong adapter layout. The comparison also
 runs with an adapter whose A and B are random and nonzero, saved and loaded
 through the same path, and its figures are written to the plan and the
-log, with no bound: a wrong layout errs by about the effect itself and
-changes the top token, which the first milestone's guard then catches on
-real answers.
+log, with no bound.
+
+Measured on the 35B in FP8 (8 prompts, log-probability of the top token):
+the current adapter 0.396, three times over; five random adapters of effect
+5.1 to 6.9, each twice, 0.19 to 0.62 (3% to 12% of the effect), the top
+token always the same; and a random adapter with its experts' order
+permuted, 0.43 (8%), not distinguishable from the others. A random adapter
+permuted is another random adapter, so no comparison with random weights
+can see the experts' order. A trained adapter is expert-specific: after 30
+training steps, vLLM's and `model.generate`'s translations of 400
+sentences with the same adapter were identical in 103 and chrF within
+0.14, which is the comparison to make on a run's saved adapters.
 
 ## 7. Acceptance on tkspark
 
