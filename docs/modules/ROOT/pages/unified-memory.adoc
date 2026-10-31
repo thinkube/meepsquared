@@ -12,10 +12,10 @@ Nothing to set. When a training job, or `from_pretrained`, loads a model whole o
 
 On such a GPU, auto mode also reads the free memory the way the machine reports it: the system's available memory. It uses that figure to choose the micro-batch and the checkpointed layers.
 
-Before the weights load, PyTorch's allocator is capped at that available memory less 4 GiB, for the page cache and the machine's own daemons. The plan says so:
+Before the weights load, PyTorch's allocator is capped at that available memory less 4 GiB, for the page cache and the machine's own daemons, and capped again when the plan's measurement starts (see below). The plan says so:
 
 ----
-  allocator cap  102.1 GiB (the system's available memory less 4 GiB for the page cache and the machine's daemons; an overflow is this process's error, not the machine's)
+  allocator cap  84.6 GiB (what this process holds plus the system's available memory less 12 GiB, set when the measurement starts, after the data is tokenized: 4 GiB for the page cache and the machine's daemons, 8 GiB for what grows after it in the job and on the machine; an overflow is this process's error, not the machine's)
 ----
 
 == Overview

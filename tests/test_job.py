@@ -854,3 +854,10 @@ def test_the_plan_says_why_the_attention_and_the_batches(tiny_model, tokenizer, 
     assert batches.text == "packed, no padding"
     assert batches.reason == "PyTorch's memory-efficient kernel keeps the examples apart (cu_seqlens)"
     assert f"  attention    meepsquared_varlen ({why})" in str(plan)
+
+
+def test_the_plans_allocator_cap_line_says_the_cap_set_when_the_measurement_starts():
+    at_load = job_module.Decision("allocator_cap", "allocator cap", 100 * 2**30, "100.0 GiB", "the system's available memory")
+    recapped = job_module._recapped(at_load, int(84.6 * 2**30))
+    assert (recapped.name, recapped.value, recapped.text) == ("allocator_cap", int(84.6 * 2**30), "84.6 GiB")
+    assert "less 12 GiB, set when the measurement starts" in recapped.reason

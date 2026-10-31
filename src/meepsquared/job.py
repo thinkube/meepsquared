@@ -1524,7 +1524,9 @@ class TrainingJob:
                 if not measured and device.type == "cuda" and _unified_memory.shares_system_memory(device.index or 0):
                     # The data is tokenized and vLLM, if any, started, both host memory outside the allocator: the
                     # cap for the GPU work that fills the memory is set from what the machine has left now
-                    model._meepsquared["allocator_cap"] = _unified_memory.recap_allocator(device.index or 0)
+                    cap = _unified_memory.recap_allocator(device.index or 0)
+                    model._meepsquared["allocator_cap"] = cap
+                    decisions[:] = [_recapped(d, cap) if d.name == "allocator_cap" else d for d in decisions]
                 measured[batch] = _measure(peft_model, batch)
             return measured[batch]
 
@@ -2097,6 +2099,15 @@ def _timed_steps_fitting(trainer, peft_model, shape, accumulation: int, timed: i
     peft_model._meepsquared_gradient_checkpointing = layout
     peft_model._meepsquared_checkpointed_layers = layout
     return timing, layout, corrected
+
+
+def _recapped(decision: Decision, cap: int) -> Decision:
+    """The plan's allocator cap line after the cap was set again when the measurement started."""
+    return dataclasses.replace(decision, value=cap, text=f"{cap / 2**30:.1f} GiB",
+                               reason="what this process holds plus the system's available memory less 12 GiB, set "
+                                      "when the measurement starts, after the data is tokenized: 4 GiB for the page "
+                                      "cache and the machine's daemons, 8 GiB for what grows after it in the job and "
+                                      "on the machine; an overflow is this process's error, not the machine's")
 
 
 def _measure(model, shape) -> tuple[int, int, int, int]:
