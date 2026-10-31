@@ -28,7 +28,7 @@ data = Dataset.from_dict({"text": ["the hare runs fast", "and the sloth sleeps",
                                    "the hare", "the sloth runs fast"]})
 out = os.environ["OUT"]
 stop = Path(out) / "STOP"
-rank = int(os.environ["RANK"])
+rank = int(os.environ.get("RANK", 0))
 
 
 def job():
@@ -40,8 +40,15 @@ def job():
     # 4 examples per update, 2 on each process, one per micro-batch: 3 micro-batches an epoch on each
     # process, 2 updates an epoch; 4 steps take two epochs
     return m2.TrainingJob(model=model, tokenizer=tokenizer, data=data, steps=4, output=out,
+                          preprocessed=os.environ.get("PREPROCESSED"),
                           recipe=m2.Recipe(effective_batch=4, optimizer="adamw_torch"),
                           overrides=m2.Overrides(micro_batch=1, checkpointed_layers=0))
+
+
+if os.environ.get("PREPROCESS_ONLY"):
+    # Run alone, before the launch: the data preprocessed, its folder printed
+    print(job().preprocess(os.environ["PREPROCESS_ONLY"]).folder)
+    raise SystemExit(0)
 
 
 class StopAfter3(TrainerCallback):

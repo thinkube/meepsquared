@@ -17,6 +17,15 @@ def failure(run) -> str:
     return "\n".join(lines[first:first + 80]) + "\n...\n" + run.stderr[-1500:]
 
 
+def preprocessed(script, tmp_path) -> str:
+    """The launch's data preprocessed first, by the script run alone; the folder it printed."""
+    env = {**os.environ, "OUT": str(tmp_path / "alone"), "CUDA_VISIBLE_DEVICES": "", "MEEPSQUARED_QUIET": "1",
+           "PREPROCESS_ONLY": str(tmp_path / "preprocessed")}
+    run = subprocess.run([sys.executable, str(script)], env=env, capture_output=True, text=True, timeout=600)
+    assert run.returncode == 0, run.stderr[-3000:]
+    return run.stdout.strip().splitlines()[-1]
+
+
 def results_of(folder):
     """What each process wrote in result-<rank>.json."""
     return [json.loads(path.read_text()) for path in sorted(Path(folder).glob("result-*.json"))]
@@ -35,11 +44,12 @@ def test_two_processes_train_with_unused_parameter_search_off(tmp_path):
 
 def test_each_process_trains_its_share_of_the_micro_batches_laid_out(tmp_path):
     script = Path(__file__).parent / "ddp" / "train_job_two_processes.py"
-    env = {**os.environ, "OUT": str(tmp_path), "CUDA_VISIBLE_DEVICES": "", "MEEPSQUARED_QUIET": "1"}
+    env = {**os.environ, "OUT": str(tmp_path / "out"), "CUDA_VISIBLE_DEVICES": "", "MEEPSQUARED_QUIET": "1",
+           "PREPROCESSED": preprocessed(script, tmp_path)}
     run = subprocess.run([sys.executable, "-m", "torch.distributed.run", "--nproc_per_node", "2", str(script)],
                          env=env, capture_output=True, text=True, timeout=600)
     assert run.returncode == 0, failure(run)
-    results = results_of(tmp_path)
+    results = results_of(tmp_path / "out")
     assert sorted(r["rank"] for r in results) == [0, 1]
     # 3 micro-batches an epoch on each process, two epochs, four steps
     assert all(r["same"] and r["batches"] == 6 and r["steps"] == r["planned"] == 4 and r["epochs"] == 2
@@ -48,11 +58,12 @@ def test_each_process_trains_its_share_of_the_micro_batches_laid_out(tmp_path):
 
 def test_each_process_resumes_at_its_next_micro_batch(tmp_path):
     script = Path(__file__).parent / "ddp" / "resume_job_two_processes.py"
-    env = {**os.environ, "OUT": str(tmp_path), "CUDA_VISIBLE_DEVICES": "", "MEEPSQUARED_QUIET": "1"}
+    env = {**os.environ, "OUT": str(tmp_path / "out"), "CUDA_VISIBLE_DEVICES": "", "MEEPSQUARED_QUIET": "1",
+           "PREPROCESSED": preprocessed(script, tmp_path)}
     run = subprocess.run([sys.executable, "-m", "torch.distributed.run", "--nproc_per_node", "2", str(script)],
                          env=env, capture_output=True, text=True, timeout=600)
     assert run.returncode == 0, failure(run)
-    results = results_of(tmp_path)
+    results = results_of(tmp_path / "out")
     assert sorted(r["rank"] for r in results) == [0, 1]
     # Stopped after step 3, within the second epoch: 5 of each process's 6 micro-batches trained, then the last
     assert all(r["same"] and r["paused"] and r["paused_at"] == 3 and (r["first"], r["second"]) == (5, 1)

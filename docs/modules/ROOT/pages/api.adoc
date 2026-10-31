@@ -29,7 +29,7 @@ _Every public name of Meep² and its arguments._
 | `eval_every` | about 10 evaluations over the planned steps | Optimizer steps between evaluations (and one at the last step). Needs `eval_data` or `eval_share`. See xref:training-job.adoc#_evaluation[Evaluation].
 | `timed_steps` | `3` on a GPU, none on the CPU | SFT only: the optimizer steps the plan times, after one to warm up, for its time per step; `0` times none. Set by hand, the steps are timed on the CPU too. See xref:training-job.adoc#_the_length_of_the_training[Training jobs].
 | `tokenizer` | `None` | The tokenizer, when `model` is a loaded model.
-| `preprocessed` | `None` | SFT only: the folder of the data preprocessed by `job.preprocess(cache_dir)`, read memory-mapped after the check that it was made from this job's inputs. Without it, the plan preprocesses the data first, into `<output>/preprocessed/`. See xref:training-job.adoc#_preprocessing[Preprocessing].
+| `preprocessed` | `None` | SFT only: the folder of the data preprocessed by `job.preprocess(cache_dir)`, read memory-mapped after the check that it was made from this job's inputs. Without it, the plan preprocesses the data first, into `<output>/preprocessed/`; a launch of several processes (`torchrun`) needs it. See xref:training-job.adoc#_preprocessing[Preprocessing].
 | `recipe` | `Recipe()` | The training choices; see <<_recipe>>.
 | `overrides` | `Overrides()` | The hardware choices; see <<_overrides>>.
 |===

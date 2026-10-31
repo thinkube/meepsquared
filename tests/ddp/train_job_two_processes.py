@@ -31,8 +31,13 @@ data = Dataset.from_dict({"text": ["the hare runs fast", "and the sloth sleeps",
 # 4 examples per update, 2 on each process, one per micro-batch: 3 micro-batches an epoch on each
 # process, 2 updates an epoch; 4 steps take two epochs
 job = m2.TrainingJob(model=model, tokenizer=tokenizer, data=data, steps=4, output=os.environ["OUT"],
+                     preprocessed=os.environ.get("PREPROCESSED"),
                      recipe=m2.Recipe(effective_batch=4, optimizer="adamw_torch"),
                      overrides=m2.Overrides(micro_batch=1, checkpointed_layers=0))
+if os.environ.get("PREPROCESS_ONLY"):
+    # Run alone, before the launch: the data preprocessed, its folder printed
+    print(job.preprocess(os.environ["PREPROCESS_ONLY"]).folder)
+    raise SystemExit(0)
 trainer = job.trainer()
 seen = []
 step = trainer.training_step

@@ -636,7 +636,8 @@ class TrainingJob:
     preprocessed: SFT only: the folder of the data preprocessed by
         job.preprocess(cache_dir) (meepsquared._preprocess), read memory-mapped
         after the check that it was made from this job's inputs. Without it,
-        the plan preprocesses the data first, into <output>/preprocessed.
+        the plan preprocesses the data first, into <output>/preprocessed; a
+        launch of several processes (torchrun) needs it.
     recipe, overrides: see Recipe and Overrides.
     """
 
