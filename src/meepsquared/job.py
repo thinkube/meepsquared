@@ -1965,6 +1965,9 @@ class TrainingJob:
         return self._prepared
 
 
+# The most timings of the steps a plan runs while it looks for the fewest layers to recompute
+TIMING_ATTEMPTS = 10
+
 # The order of the plan's lines: how the model runs, then how it learns, then what it learns from
 ORDER = ["loading", "allocator_cap", "weights", "attention", "padding_free", "liger", "fused_lora", "compile_layers",
          "checkpointed_layers", "selective_layers", "allocator", "vllm", "tokens_per_update", "effective_batch",
@@ -2025,11 +2028,14 @@ def _timed_steps_fitting(trainer, peft_model, shape, accumulation: int, timed: i
     against the memory.
 
     A peak over the budget (meepsquared._checkpointing.peak_budget), or an out-of-memory error, puts more layers to
-    recompute whole and times again: first as many more as the overshoot
-    takes at one layer's measured activations, then every layer. A layout
-    given by hand is not changed: the error says what happened. Returns
-    (timing, layout, text), the text saying what was corrected, "" when
-    nothing.
+    recompute whole and times again, then looks for the fewest that fit: a
+    peak over the budget first adds as many layers as the overshoot takes at
+    one layer's measured activations; a step that ran out of memory tries
+    halfway to the most layers known to fit, or to every layer; once a
+    layout fits, the layouts between it and the last that did not are
+    timed the same way, until none is left between. A layout given by hand
+    is not changed: the error says what happened. Returns (timing, layout,
+    text), the text saying what was corrected, "" when nothing.
     """
     import torch
 
@@ -2037,31 +2043,51 @@ def _timed_steps_fitting(trainer, peft_model, shape, accumulation: int, timed: i
 
     budget = _checkpointing.peak_budget(device, margin) if margin is not None else None
     corrected = ""
-    for attempt in range(3):
+    failed = None  # the most layers recomputed whole that did not fit
+    fitting = None  # (layers recomputed whole, timing, layout) of the fewest that fit
+    for attempt in range(TIMING_ATTEMPTS):
         try:
             timing = _sessions.time_steps(trainer, shape, accumulation, timed, eval_shape)
             peak = timing.peak_gpu_allocated_bytes
             if budget is None or peak is None or peak <= budget:
-                return timing, layout, corrected
-            found = f"the timed steps peaked at {_gib(peak)}, {_gib(peak - budget)} over the budget of {_gib(budget)}"
-            more = math.ceil((peak - budget) / figures.per_layer) if figures is not None and figures.per_layer > 0 else layer_count
+                if fitting is None or layout.whole < fitting[0]:
+                    fitting = (layout.whole, timing, layout)
+                if failed is None or layout.whole - failed <= 1:
+                    break
+                found = f"{layout.text(layer_count)} fit, the timed steps peaking at {_gib(peak)}"
+                whole = (failed + layout.whole) // 2
+            else:
+                found = f"the timed steps peaked at {_gib(peak)}, {_gib(peak - budget)} over the budget of {_gib(budget)}"
+                failed = layout.whole
+                more = math.ceil((peak - budget) / figures.per_layer) if figures is not None and figures.per_layer > 0 else layer_count
+                whole = min(failed + more, fitting[0] - 1 if fitting is not None else layer_count)
         except torch.OutOfMemoryError:
             torch.cuda.empty_cache()
-            found, more = f"the timed steps ran out of memory on {shape.text()}", layer_count
+            found = f"the timed steps ran out of memory on {shape.text()}"
+            failed = layout.whole
+            whole = (failed + (fitting[0] if fitting is not None else layer_count) + 1) // 2
         if layout_given:
             raise RuntimeError(f"{found}, with the layout given by hand ({layout.text(layer_count)}); checkpoint more "
                                "layers, lower the micro-batch or recipe.max_length, or use method='qlora'")
-        if layout.checkpointed >= layer_count and layout.selective == 0:
+        if fitting is None and failed >= layer_count:
             raise RuntimeError(f"{found}, with every layer recomputed whole: the micro-batch ({shape.text()}) does "
                                "not fit; lower recipe.max_length or the batch, or use method='qlora'")
-        whole = min(layer_count, layout.whole + more) if attempt == 0 else layer_count
+        whole = max(whole, failed + 1)
+        if fitting is not None and whole >= fitting[0]:
+            break
         layout = _checkpointing.Recompute(whole, min(layout.selective, layer_count - whole))
         _checkpointing.set_checkpointed(peft_model, layout)
         peft_model._meepsquared_gradient_checkpointing = layout
         peft_model._meepsquared_checkpointed_layers = layout
         corrected += ("; " if corrected else "") + f"{found}: {layout.text(layer_count)} recompute, timed again"
-    raise RuntimeError(f"{corrected}; the steps still do not fit; lower recipe.max_length or the batch, or use "
-                       "method='qlora'")
+    if fitting is None:
+        raise RuntimeError(f"{corrected}; the steps still do not fit; lower recipe.max_length or the batch, or use "
+                           "method='qlora'")
+    whole, timing, layout = fitting
+    _checkpointing.set_checkpointed(peft_model, layout)
+    peft_model._meepsquared_gradient_checkpointing = layout
+    peft_model._meepsquared_checkpointed_layers = layout
+    return timing, layout, corrected
 
 
 def _measure(model, shape) -> tuple[int, int, int, int]:

@@ -64,21 +64,37 @@ def test_steps_within_the_budget_change_nothing(monkeypatch, tiny_model):
     assert len(timed) == 1
 
 
-def test_a_peak_over_the_budget_adds_layers_by_the_overshoot_and_times_again(monkeypatch, tiny_model):
-    # 2 GiB over at 1 GiB a layer: two more layers recompute whole (the tiny model has two)
+def test_a_peak_over_the_budget_adds_layers_by_the_overshoot_then_looks_for_the_fewest(monkeypatch, tiny_model):
+    # 2 GiB over at 1 GiB a layer: two more layers recompute whole (the tiny model has two) and fit; the layout
+    # between, one layer, is timed too and does not fit, so two it is
     (result, layout, corrected), timed, layers = checked(
-        monkeypatch, tiny_model, [12 * GIB, 8 * GIB], _checkpointing.Recompute(0, 0))
-    assert layout == _checkpointing.Recompute(min(2, layers), 0)
+        monkeypatch, tiny_model, [12 * GIB, 8 * GIB, 11 * GIB], _checkpointing.Recompute(0, 0))
+    assert layout == _checkpointing.Recompute(2, 0)
     assert result.peak_gpu_allocated_bytes == 8 * GIB
     assert "2.00 GiB over the budget of 10.00 GiB" in corrected and "timed again" in corrected
-    assert len(timed) == 2
+    assert "fit, the timed steps peaking at 8.00 GiB" in corrected
+    assert [t.whole for t in timed] == [0, 2, 1]
     assert all(layer.gradient_checkpointing for layer in _checkpointing.layers(tiny_model)[:layout.whole])
 
 
-def test_an_out_of_memory_step_puts_every_layer_to_recompute(monkeypatch, tiny_model):
+def test_the_fewest_layers_that_fit_are_kept(monkeypatch, tiny_model):
+    # Two layers fit, then one fits too: one is kept, and the model is laid out for it
+    (result, layout, corrected), timed, layers = checked(
+        monkeypatch, tiny_model, [12 * GIB, 8 * GIB, 9 * GIB], _checkpointing.Recompute(0, 0))
+    assert layout == _checkpointing.Recompute(1, 0) and result.peak_gpu_allocated_bytes == 9 * GIB
+    assert [t.whole for t in timed] == [0, 2, 1]
+    assert [bool(layer.gradient_checkpointing) for layer in _checkpointing.layers(tiny_model)] == [True, False]
+
+
+def test_an_out_of_memory_step_tries_halfway_to_every_layer(monkeypatch, tiny_model):
     (result, layout, corrected), timed, layers = checked(monkeypatch, tiny_model, ["oom", 7 * GIB], _checkpointing.Recompute(0, 0))
-    assert layout == _checkpointing.Recompute(layers, 0) and "ran out of memory" in corrected
-    assert result.peak_gpu_allocated_bytes == 7 * GIB
+    assert layout == _checkpointing.Recompute(1, 0) and "ran out of memory" in corrected
+    assert result.peak_gpu_allocated_bytes == 7 * GIB and [t.whole for t in timed] == [0, 1]
+
+
+def test_out_of_memory_steps_end_with_every_layer_and_then_stop(monkeypatch, tiny_model):
+    with pytest.raises(RuntimeError, match="every layer recomputed whole"):
+        checked(monkeypatch, tiny_model, ["oom", "oom", "oom"], _checkpointing.Recompute(0, 0))
 
 
 def test_steps_that_never_fit_stop_with_the_figures(monkeypatch, tiny_model):
