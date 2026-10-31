@@ -182,10 +182,20 @@ class _Tokenizing:
 def tokenized(dataset, tokenizer, args, name: str):
     """The dataset tokenized as TRL's SFTTrainer tokenizes it (input_ids and labels; a completion mask when the loss
     is not on the completions alone), without a trainer or a model."""
+    import contextlib
+
     from trl import SFTTrainer
+    from trl.trainer import sft_trainer
 
     stand_in = _Tokenizing(tokenizer, args, dataset[0])
-    return SFTTrainer._prepare_dataset(stand_in, dataset, tokenizer, args, False, None, name)
+    # TRL runs its tokenization main process first, behind process-group barriers every process must enter; a
+    # preprocessing runs in one process (see preprocess), so the barriers are left out
+    ordered = sft_trainer.global_then_local_main_first
+    sft_trainer.global_then_local_main_first = contextlib.nullcontext
+    try:
+        return SFTTrainer._prepare_dataset(stand_in, dataset, tokenizer, args, False, None, name)
+    finally:
+        sft_trainer.global_then_local_main_first = ordered
 
 
 def column(dataset, name: str):
@@ -327,16 +337,30 @@ class Building:
 
 def preprocess(job, cache_dir, cores: Optional[int] = None, say=print) -> Outcome:
     """The job's SFT data preprocessed into `<cache_dir>/<key>`: found there when made before with the same key,
-    else built now. `say` is told what happens."""
+    else built now. `say` is told what happens. Of the processes of a launch (torchrun), process 0 preprocesses
+    while the others wait at a barrier, then find its folder."""
+    if int(os.environ.get("WORLD_SIZE", 1)) == 1:
+        return _preprocess_here(job, cache_dir, cores, say)
+    from accelerate import PartialState
+
+    state = PartialState()
+    if state.is_main_process:
+        try:
+            return _preprocess_here(job, cache_dir, cores, say)
+        finally:
+            state.wait_for_everyone()
+    state.wait_for_everyone()
+    return _preprocess_here(job, cache_dir, cores, say)
+
+
+def _preprocess_here(job, cache_dir, cores: Optional[int], say) -> Outcome:
     from meepsquared import _unified_memory, job as _job
     from meepsquared.models import load_tokenizer
 
     if job.task != "sft":
         raise ValueError(f"preprocessing is for SFT's data; the job's task is {job.task!r}")
     if cores is None:
-        # Each process of a launch (torchrun) preprocesses, as TRL's trainer tokenizes in each: process 0 first,
-        # the others behind TRL's barrier, each on one core; preprocess ahead and give the folder to do it once
-        cores = 1 if int(os.environ.get("WORLD_SIZE", 1)) > 1 else _unified_memory.job_cores()
+        cores = _unified_memory.job_cores()
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     tokenizer = job.tokenizer if job.tokenizer is not None else load_tokenizer(job.model)
