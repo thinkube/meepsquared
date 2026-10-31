@@ -53,14 +53,16 @@ def allocator_cap(available: int, total: int) -> int:
 
 def recap_allocator(device: int = 0) -> int:
     """Cap PyTorch's allocator again, at what this process holds now plus what the system has available less the
-    headroom: after something else in the process (a shared vLLM) has taken memory, outside the allocator too, the cap
-    set before it would let the process take more than the machine has left. Returns the cap in bytes."""
+    headroom: after something in the process has taken memory outside the allocator (a shared vLLM, the tokenized
+    data of a large dataset, which is host memory), the cap set before it would let the process take more than the
+    machine has left. Called before the GPU work that fills the memory: the plan's measurement and the training.
+    Returns the cap in bytes."""
     import torch
 
     total = torch.cuda.get_device_properties(device).total_memory
     held = torch.cuda.memory_reserved(device)
-    # Three times the headroom: the training's own host memory still grows after loading by 10 GiB and more on
-    # Qwen3.6-35B-A3B (its data, its loader, its kernels' compilation)
+    # Three times the headroom: 4 GiB for the page cache and the daemons, 8 GiB for what grows after this cap, the
+    # training's own host memory (its loader's workers, its kernels' compilation) and the machine's other processes
     cap = min(held + allocator_cap(available_memory() - 2 * HEADROOM, total), total)
     torch.cuda.set_per_process_memory_fraction(cap / total, device)
     return cap
@@ -125,3 +127,16 @@ def shards_to_gpu(device: str = "cuda:0"):
         yield
     finally:
         modeling_utils.safe_open = real
+
+
+def job_cores() -> int:
+    """The CPU cores this process may use: its affinity, within its cgroup's CPU quota."""
+    cores = len(os.sched_getaffinity(0))
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            quota, period = f.read().split()
+        if quota != "max":
+            cores = min(cores, max(1, int(quota) // int(period)))
+    except FileNotFoundError:
+        pass
+    return cores

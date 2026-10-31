@@ -821,7 +821,7 @@ class TrainingJob:
     def _train(self, resume: bool, stop, status) -> Result:
         import torch
 
-        from meepsquared import _batches, _milestones, _sessions
+        from meepsquared import _batches, _milestones, _sessions, _unified_memory
 
         prepared = self._prepare()
         if prepared.trained:
@@ -858,6 +858,8 @@ class TrainingJob:
         on_gpu = device.type == "cuda"
         if on_gpu:
             torch.cuda.reset_peak_memory_stats(device)
+        if on_gpu and _unified_memory.shares_system_memory(device.index or 0):
+            _unified_memory.recap_allocator(device.index or 0)
         start = time.perf_counter()
         trainer.train(resume_from_checkpoint=checkpoint)
         seconds = time.perf_counter() - start
@@ -1124,17 +1126,20 @@ class TrainingJob:
         """
         from trl import SFTConfig, SFTTrainer
 
-        from meepsquared import _batches, _checkpointing, _trl
+        from meepsquared import _batches, _checkpointing, _trl, _unified_memory
 
         was = peft_model._meepsquared_gradient_checkpointing, peft_model._meepsquared_compile_layers
         peft_model._meepsquared_gradient_checkpointing = len(_checkpointing.layers(peft_model))
         peft_model._meepsquared_compile_layers = False
         try:
             # A batch of 2 rows: this trainer only tokenizes the data and lays out the batches, and TRL warns
-            # about padding-free training with a batch of 1 row, which a reader would take for the training's
+            # about padding-free training with a batch of 1 row, which a reader would take for the training's.
+            # TRL tokenizes on the job's cores: a large dataset is minutes a core
+            cores = _unified_memory.job_cores()
             trainer = SFTTrainer(model=peft_model,
                                  args=SFTConfig(max_length=None, per_device_train_batch_size=2,
-                                                gradient_accumulation_steps=1, max_steps=1, report_to=[], **args),
+                                                gradient_accumulation_steps=1, max_steps=1, report_to=[],
+                                                dataset_num_proc=cores if cores > 1 else None, **args),
                                  train_dataset=dataset, eval_dataset=eval_dataset, processing_class=tokenizer)
         finally:
             peft_model._meepsquared_gradient_checkpointing, peft_model._meepsquared_compile_layers = was
@@ -1299,7 +1304,7 @@ class TrainingJob:
         from trl import GRPOConfig, SFTConfig
 
         from meepsquared import (_allocator, _batches, _checkpointing, _compile, _data_checks, _milestones, _moe,
-                            _selective, _sessions, chat_templates)
+                            _selective, _sessions, _unified_memory, chat_templates)
         from meepsquared.models import DEFAULT_TARGETS, MeepLanguageModel, _fused_wanted, keeps_examples_apart
 
         recipe, overrides = self.recipe, self.overrides
@@ -1516,6 +1521,10 @@ class TrainingJob:
         def measurement(micro: int, budget_rows: Optional[int]):
             batch = shape(micro, budget_rows)
             if batch not in measured:
+                if not measured and device.type == "cuda" and _unified_memory.shares_system_memory(device.index or 0):
+                    # The data is tokenized and vLLM, if any, started, both host memory outside the allocator: the
+                    # cap for the GPU work that fills the memory is set from what the machine has left now
+                    model._meepsquared["allocator_cap"] = _unified_memory.recap_allocator(device.index or 0)
                 measured[batch] = _measure(peft_model, batch)
             return measured[batch]
 

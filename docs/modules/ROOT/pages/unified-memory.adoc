@@ -37,10 +37,12 @@ On a discrete GPU, a training that asks for more memory than the GPU has gets a 
 
 The cap turns that into an ordinary error. PyTorch's allocator refuses the allocation that would pass the cap, the training (or the plan, while it measures) gets an `OutOfMemoryError`, and the machine keeps the headroom. The headroom is 4 GiB: what the page cache needs for the files a training reads and writes, and the growth of the machine's own daemons while it runs. Those needs do not grow with the machine, so the headroom is a fixed amount, not a share. What the other processes already hold is not available, and so not in the cap either.
 
-The cap is set once per process, when the first model loads; `torch.cuda.set_per_process_memory_fraction` can change it afterwards.
+The cap is set when the first model loads, from the memory available then. A training job takes host memory after that, outside the allocator: the tokenized data (14 GB for 1.9 million rows of Qwen3.6-35B-A3B), the data loader, the kernels it compiles, and a shared vLLM (xref:training-job.adoc#_milestones_through_vllm[Milestones through vLLM]). The cap set at load would then let the GPU work take what that memory already took. So the cap is set again, from the memory available at that moment, just before the GPU work that fills the memory: the plan's first measurement, which comes after the data is tokenized and vLLM, if any, is started; the training's first step; and the start of vLLM. Each time the cap is what the process holds plus the available memory less 12 GiB: the 4 GiB headroom, and 8 GiB for what grows after it in and around the job, the training's own host memory (its loader's workers, its kernels' compilation) and the other processes on the machine, such as a desktop session. The plan's `allocator cap` line is the cap of the measurement. Over the training's steps, the planner's margin (xref:training-job.adoc#_the_plan[the plan], at least 4 GiB on such a GPU) is kept free below the cap besides.
+
+The tokenization of the data, which is CPU work, runs on the cores the job may use (its CPU affinity within its cgroup's quota): one core takes minutes per million rows.
 
 == Limits
 
 * Only the loading of model shards changes; other reads of safetensors files go to safetensors as usual.
-* The memory the model takes is still the system's memory: what other processes use on the machine is not available to training, and a process that starts after the cap was set is not counted in it.
+* The memory the model takes is still the system's memory: what other processes use on the machine is not available to training. Another process that starts, or grows, after the cap was last set is counted only up to the 12 GiB the cap leaves; what grows past that competes with the training for the machine's memory.
 * The cap holds PyTorch's allocations. Memory taken outside it, such as a library's own CUDA buffers, is not capped; it is small next to the weights and the activations.

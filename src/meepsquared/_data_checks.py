@@ -146,7 +146,11 @@ def cut(dataset, max_length: int):
 
     if max(pc.list_value_length(dataset.data.column("input_ids")).to_pylist(), default=0) <= max_length:
         return dataset
-    return dataset.map(_trl._cut, fn_kwargs={"max_length": max_length}, desc="Cutting to max_length")
+    from meepsquared import _unified_memory
+
+    cores = _unified_memory.job_cores()
+    return dataset.map(_trl._cut, fn_kwargs={"max_length": max_length}, desc="Cutting to max_length",
+                       num_proc=cores if cores > 1 else None)
 
 
 class _Weighted:
