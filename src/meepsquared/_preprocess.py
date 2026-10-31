@@ -346,7 +346,9 @@ def preprocess(job, cache_dir, cores: Optional[int] = None, say=print) -> Outcom
     state = PartialState()
     if state.is_main_process:
         try:
-            return _preprocess_here(job, cache_dir, cores, say)
+            # On one core: a pool of worker processes forked from a process that holds the launch's process group
+            # hangs or dies (multiprocess EOFError); preprocess ahead and give the folder to use the cores
+            return _preprocess_here(job, cache_dir, 1, say)
         finally:
             state.wait_for_everyone()
     state.wait_for_everyone()
