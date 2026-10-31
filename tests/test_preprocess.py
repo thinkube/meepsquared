@@ -54,7 +54,8 @@ def test_other_inputs_make_another_key_and_a_folder_of_other_inputs_is_refused(t
                           overrides=m2.Overrides(micro_batch=1, checkpointed_layers=0))
     second = shorter.preprocess(tmp_path / "cache")
     assert not second.found and second.key != first.key
-    assert second.report["decision"]["text"].startswith("8 rows render; 3 longer than 3 tokens")
+    assert "longer than 3 tokens" in second.report["decision"]["text"]
+    assert second.report["decision"]["value"]["longer"]["count"] > 0 and second.report["trained_rows"] == 8
     with pytest.raises(ValueError, match="made from other inputs than this job's: max_length differ"):
         make_job(tokenizer, tmp_path / "c", preprocessed=second.folder).plan()
     with pytest.raises(ValueError, match="is not a preprocessing folder"):

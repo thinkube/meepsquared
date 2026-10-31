@@ -1229,7 +1229,17 @@ class TrainingJob:
             # the folder given as `preprocessed`, else here, into the output folder
             folder = self.preprocessed
             if folder is None:
+                # Of several processes (a torchrun launch), process 0 preprocesses and the others find its folder
+                state = None
+                if int(os.environ.get("WORLD_SIZE", 1)) > 1:
+                    from accelerate import PartialState
+
+                    state = PartialState()
+                    if not state.is_main_process:
+                        state.wait_for_everyone()
                 folder = _preprocess.preprocess(self, Path(output) / PREPROCESSED, say=_say).folder
+                if state is not None and state.is_main_process:
+                    state.wait_for_everyone()
             with open(Path(folder) / _preprocess.REPORT_FILE) as f:
                 report = json.load(f)
             kind, source, eval_source, rows = report["kind"], report["source"], report["eval_source"], report["rows"]
@@ -1366,6 +1376,7 @@ class TrainingJob:
         # SFT: the data as preprocessed, memory-mapped (see _data); the micro-batches are laid out
         # from the examples' lengths
         prepared, lengths, loading, markers, answer_args, data = None, None, None, None, {}, None
+        trainer_answer_args = {}
         # The evaluation set, preprocessed alike; with eval_share, held out of the training data
         # before the micro-batches are laid out, so that none is trained on or measured
         eval_prepared, held = None, 0
@@ -1373,8 +1384,11 @@ class TrainingJob:
                      "use_cpu": device.type == "cpu"}
         if self.task == "sft":
             markers = self._answers(kind, tokenizer, answer_args, decisions)
+            # The preprocessed data carries TRL's labels, built with assistant_only_loss where the plan says so;
+            # TRL refuses the setting itself on tokenized data, which it takes for not conversational
+            trainer_answer_args = {k: v for k, v in answer_args.items() if k != "assistant_only_loss"}
             data = self._data(peft_model, tokenizer, folder, kind, markers, answer_args, max_length,
-                              {**base_args, **answer_args,
+                              {**base_args, **trainer_answer_args,
                                **({"padding_free": overrides.padding_free} if overrides.padding_free is not None
                                   else {})})
             prepared, eval_prepared, loading, held = data.train, data.eval, data.loading, data.held
@@ -1624,7 +1638,7 @@ class TrainingJob:
         if self.task == "sft":
             from trl import SFTTrainer
 
-            args.update(answer_args)
+            args.update(trainer_answer_args)
             # from_pretrained decided whether the model can train padding-free, and why not
             padding_free_auto = model._meepsquared["padding_free"]
             refusal = model._meepsquared.get("padding_free_reason")

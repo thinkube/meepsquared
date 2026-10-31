@@ -9,7 +9,7 @@ import torch
 from datasets import Dataset
 
 import meepsquared as m2
-from meepsquared import _batches, _checkpointing, _compile, _moe, cli, job as job_module
+from meepsquared import _batches, _checkpointing, _compile, _moe, cli, job as job_module, models
 from meepsquared.chat_templates import ResponsesOnly
 from meepsquared.job import Plan, TrainingJob
 
@@ -845,6 +845,7 @@ def test_the_plan_says_why_the_attention_and_the_batches(tiny_model, tokenizer, 
         return tiny_model, tokenizer
 
     monkeypatch.setattr(MeepLanguageModel, "from_pretrained", staticmethod(loaded))
+    monkeypatch.setattr(models, "load_tokenizer", lambda name, **kwargs: tokenizer)
     fake_measurements(monkeypatch)
     plan = TrainingJob(model="org/model", data=TEXT, output=str(tmp_path / "out"), steps=2,
                        overrides=m2.Overrides(liger=False)).plan()
