@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -133,6 +134,15 @@ def found(folder: Path, inputs: dict) -> bool:
         return False
     with open(key_file) as f:
         return json.load(f) == inputs
+
+
+def report_of(folder) -> dict:
+    """The report of a preprocessing folder; refused for a folder that is not one."""
+    folder = Path(folder)
+    if not (folder / KEY_FILE).exists() or not (folder / REPORT_FILE).exists():
+        raise ValueError(f"preprocessed: {folder} is not a preprocessing folder (no {KEY_FILE} and {REPORT_FILE})")
+    with open(folder / REPORT_FILE) as f:
+        return json.load(f)
 
 
 def open_folder(folder, inputs: dict) -> tuple:
@@ -319,7 +329,7 @@ class Building:
 def preprocess(job, cache_dir, cores: Optional[int] = None, say=print) -> Outcome:
     """The job's SFT data preprocessed into `<cache_dir>/<key>`: found there when made before with the same key,
     else built now. `say` is told what happens."""
-    from meepsquared import _unified_memory, job as _job
+    from meepsquared import _sessions, _unified_memory, job as _job
     from meepsquared.models import load_tokenizer
 
     if job.task != "sft":
@@ -349,9 +359,16 @@ def preprocess(job, cache_dir, cores: Optional[int] = None, say=print) -> Outcom
                             else None, tokenizer, kind, answer_args, markers, max_length, job.eval_share)
         key = key_of(key_inputs)
         target = cache_dir / key
+        if not _sessions.main_process():
+            # Of several processes (a torchrun launch), process 0 preprocesses; the others wait for its folder
+            waited = 0
+            while not found(target, key_inputs):
+                if waited % 60 == 0:
+                    say(f"waiting for process 0 to preprocess the data into {target}")
+                time.sleep(1)
+                waited += 1
         if found(target, key_inputs):
-            with open(target / REPORT_FILE) as f:
-                report = json.load(f)
+            report = report_of(target)
             say(f"preprocessed data found in {target}: {report['decision']['text']}")
             return Outcome(str(target), key, True, report)
         say(f"preprocessing {len(dataset):,} rows of {source} on {cores} core{'s' if cores != 1 else ''} into {target}")

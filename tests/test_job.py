@@ -721,7 +721,8 @@ def test_conversations_train_on_the_answers_with_trls_mask(tiny_model, chat_toke
     assert answers.value is True and answers.by == "auto"
     assert "TRL's assistant-only loss" in answers.text and "generation" in answers.reason
     trainer = job.trainer()
-    assert trainer.args.assistant_only_loss is True
+    # The labels of the preprocessed data carry TRL's mask; the trainer, built on tokens, is not told the setting
+    assert not trainer.args.assistant_only_loss
     assert kept_tokens(trainer, tokenizer) == ["runs", "fast", "<|im_end|>"] * 2
 
 

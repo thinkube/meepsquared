@@ -26,7 +26,6 @@ and the command `meepsquared train job.yaml` (see meepsquared.cli).
 import dataclasses
 import importlib
 import importlib.util
-import json
 import math
 import os
 import re
@@ -1229,19 +1228,8 @@ class TrainingJob:
             # the folder given as `preprocessed`, else here, into the output folder
             folder = self.preprocessed
             if folder is None:
-                # Of several processes (a torchrun launch), process 0 preprocesses and the others find its folder
-                state = None
-                if int(os.environ.get("WORLD_SIZE", 1)) > 1:
-                    from accelerate import PartialState
-
-                    state = PartialState()
-                    if not state.is_main_process:
-                        state.wait_for_everyone()
                 folder = _preprocess.preprocess(self, Path(output) / PREPROCESSED, say=_say).folder
-                if state is not None and state.is_main_process:
-                    state.wait_for_everyone()
-            with open(Path(folder) / _preprocess.REPORT_FILE) as f:
-                report = json.load(f)
+            report = _preprocess.report_of(folder)
             kind, source, eval_source, rows = report["kind"], report["source"], report["eval_source"], report["rows"]
         else:
             dataset, source = self._dataset()
