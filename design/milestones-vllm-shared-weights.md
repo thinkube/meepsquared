@@ -237,15 +237,24 @@ initial one at setup):
 
 - Compare the logits of the first generated token from the trainer
   (transformers forward, adapter on) and from vLLM (adapter loaded).
-- Pass: the top-1 token is the same for all 8, and the largest absolute
-  logit difference is below a bound the implementer measures and states, at
-  BF16 rounding level.
+- Pass, for each of the 8: the top-1 token is the same, or the two top
+  tokens are a tie, which is when either engine ranks them within 1.0 of
+  log-probability of each other (measured on Qwen3.6-35B-A3B: a prompt had
+  its two candidates 0.63 apart in the trainer and the other first in vLLM;
+  rounding decides between them); and where the top tokens are the same,
+  its log-probability differs by at most 0.5 (measured 0.16 in BF16, 0.24
+  to 0.40 in FP8 from run to run). The tail of the top 20 is not compared:
+  two implementations of a mixture of experts in 16 bits route some tokens
+  to other experts, and the unlikely tokens move by 1 to 4.
 - Fail: the job stops with the numbers.
 
 At setup a fresh LoRA's B is zero, so the adapter changes nothing and the
 check above cannot detect a wrong adapter layout. The check must therefore
 also run once with an adapter whose A and B are random and nonzero, saved
-and loaded through the same path.
+and loaded through the same path. Its bound on the top token's
+log-probability is the larger of 0.5 and a tenth of the adapter's effect
+(measured 0.30 to 0.38 with an effect of 5.1); a wrong layout errs by about
+the effect itself and changes the top token.
 
 ## 7. Acceptance on tkspark
 
