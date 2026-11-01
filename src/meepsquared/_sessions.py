@@ -247,13 +247,18 @@ def record_plan(output: str, plan) -> None:
         write_json(Path(output) / PLAN_FILE, plan.to_dict())
 
 
-def check_same_plan(output: str, plan) -> None:
-    """Refuse a resume whose plan makes other micro-batches, updates or schedule than the first session's did."""
+def first_plan(output: str) -> dict:
+    """The plan of the training's first session, as record_plan kept it in `output`."""
     path = Path(output) / PLAN_FILE
     if not path.is_file():
         raise FileNotFoundError(f"resume: {path} is missing: meepsquared writes it when a training starts, and resumes "
                                 "only a training it started")
-    first = {d["name"]: d["value"] for d in json.loads(path.read_text())["decisions"]}
+    return json.loads(path.read_text())
+
+
+def check_same_plan(output: str, plan) -> None:
+    """Refuse a resume whose plan makes other micro-batches, updates or schedule than the first session's did."""
+    first = {d["name"]: d["value"] for d in first_plan(output)["decisions"]}
     now = {d.name: json.loads(json.dumps(d.value)) for d in plan.decisions}
     differ = [f"{name}: {first.get(name)!r} then, {now.get(name)!r} now" for name in SAME_ON_RESUME
               if first.get(name) != now.get(name)]

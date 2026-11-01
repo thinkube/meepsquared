@@ -664,6 +664,8 @@ class TrainingJob:
     recipe: Recipe = field(default_factory=Recipe)
     overrides: Overrides = field(default_factory=Overrides)
     _prepared: Optional[_Prepared] = field(default=None, init=False, repr=False, compare=False)
+    # A resumed training's first session's plan (meepsquared._sessions.first_plan), whose batches and layout it keeps
+    _first: Optional[dict] = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         if self.model is None or (isinstance(self.model, str) and not self.model):
@@ -840,11 +842,21 @@ class TrainingJob:
 
         from meepsquared import _batches, _milestones, _sessions, _unified_memory
 
+        # The output folder is checked before the model loads: a resume needs a checkpoint and the first session's
+        # plan, whose batches and layout it keeps unless plan() or trainer() measured them already; a new training
+        # needs an output folder without another's checkpoints
+        checkpoint, step = None, 0
+        if self._prepared is None:
+            folder = self._output(self.model)
+            if resume:
+                _sessions.to_resume(folder)
+                self._first = _sessions.first_plan(folder)
+            else:
+                _sessions.refuse_earlier_checkpoints(folder)
         prepared = self._prepare()
         if prepared.trained:
             raise RuntimeError("this job has trained already; make a new TrainingJob to train again")
         trainer, output = prepared.trainer, prepared.output
-        checkpoint, step = None, 0
         if resume:
             checkpoint = _sessions.to_resume(output)
             _sessions.check_same_plan(output, prepared.plan)
@@ -1223,6 +1235,8 @@ class TrainingJob:
 
         recipe, overrides = self.recipe, self.overrides
         output = self._output(self.model)
+        # A resumed training: the first session's decisions, by name
+        first = {d["name"]: d for d in self._first["decisions"]} if self._first is not None else None
         dataset = source = eval_source = None
         if self.task == "sft":
             # The data is preprocessed (tokenized, checked, cut) before the model loads: by the caller, into
@@ -1360,7 +1374,8 @@ class TrainingJob:
         # and on a GPU also when all are set by hand, to report its own choice beside them
         need_auto = (overrides.micro_batch is None or overrides.checkpointed_layers is None
                      or measured_budget)
-        measure = need_auto or device.type == "cuda"
+        # A resumed training keeps the first session's batch and layout, and measures nothing
+        measure = (need_auto or device.type == "cuda") and first is None
         measured = {}
         # SFT: the data as preprocessed, memory-mapped (see _data); the micro-batches are laid out
         # from the examples' lengths
@@ -1478,7 +1493,10 @@ class TrainingJob:
                                      "processes")
                 per_process_tokens = recipe.tokens_per_update // world
                 slots = math.ceil(per_process_tokens / max_length)
-                micro_auto = largest_fitting(slots, half) if measure else None
+                micro_auto = (largest_fitting(slots, half) if measure
+                              else first["micro_batch"]["value"] if first is not None else None)
+            elif first is not None:
+                slots = first["tokens_per_update"]["value"] // (max_length * world)
             else:
                 slots = largest_fitting(max(1, TOKENS_PER_UPDATE_CEILING // (max_length * world)), half,
                                         as_budget=True)
@@ -1498,7 +1516,7 @@ class TrainingJob:
                 raise ValueError(f"overrides.micro_batch={overrides.micro_batch} does not divide the {per_process} "
                                  "examples per update of each process")
             micro_auto = (largest_fitting(per_process, lambda m: smaller_micro_batch(per_process, m)) if measure
-                          else None)
+                          else first["micro_batch"]["value"] if first is not None else None)
             micro = overrides.micro_batch if overrides.micro_batch is not None else micro_auto
             accumulation = batching(micro, None)[0]
             share = f"{per_process} examples"
@@ -1526,7 +1544,10 @@ class TrainingJob:
             free_bytes = margin_bytes = None
             micro_why = checkpoint_why = "the model is not on a CUDA GPU"
         whole_auto, whole_why = checkpointed_auto, checkpoint_why
-        if overrides.checkpointed_layers is not None:
+        if first is not None and first["checkpointed_layers"]["value"] is not None:
+            layout = _checkpointing.Recompute(first["checkpointed_layers"]["value"],
+                                              first["selective_layers"]["value"] or 0)
+        elif overrides.checkpointed_layers is not None:
             layout = _checkpointing.Recompute(overrides.checkpointed_layers, overrides.selective_layers or 0)
         elif overrides.selective_layers is not None:
             # The user's selective layers, and as few recomputed whole as the memory needs beside them
@@ -1751,6 +1772,8 @@ class TrainingJob:
             time_why = "GRPO's steps generate their completions, which timed training steps would leave out"
         elif timed == 0:
             time_why = "timed_steps=0"
+        elif first is not None:
+            time_why = "a resumed training: the first session's timing"
         elif device.type != "cuda" and self.timed_steps is None:
             time_why = "the model is not on a CUDA GPU; timed_steps set by hand times the steps there too"
         else:
@@ -1879,6 +1902,14 @@ class TrainingJob:
                                                                             if evaluations else "")
                 + "; the host: the process's peak resident memory since it started, loading included" + held))
 
+        if first is not None:
+            # A resumed training trains the first session's batch and layout: its lines for them, and its time and
+            # memory, measured then
+            decisions = [Decision(**first[d.name]) if d.name in RESUMED and d.name in first else d for d in decisions]
+            free_bytes, seconds_per_step, estimated = (self._first["free_bytes"], self._first["seconds_per_step"],
+                                                       self._first["estimated_seconds"])
+            peak_gpu, peak_host, request = (self._first["peak_gpu_bytes"], self._first["peak_host_bytes"],
+                                            self._first["memory_request_bytes"])
         device_name = torch.cuda.get_device_name(device) if device.type == "cuda" else "the CPU"
         plan = Plan(model=self.model if isinstance(self.model, str) else str(model.config._name_or_path),
                     task=self.task, method=self.method, device=device_name, free_bytes=free_bytes,
@@ -1891,6 +1922,9 @@ class TrainingJob:
 
 # The most timings of the steps a plan runs while it looks for the fewest layers to recompute
 TIMING_ATTEMPTS = 10
+
+# The plan's lines a resumed training takes from its first session's plan, which measured and timed them
+RESUMED = ("micro_batch", "checkpointed_layers", "selective_layers", "duration", "memory", "milestones")
 
 # The order of the plan's lines: how the model runs, then how it learns, then what it learns from
 ORDER = ["loading", "allocator_cap", "weights", "attention", "padding_free", "liger", "fused_lora", "compile_layers",

@@ -215,6 +215,36 @@ def test_a_new_training_over_checkpoints_and_a_resume_planned_otherwise_are_refu
         make_job(tokenizer, tmp_path / "out", learning_rate=2e-3).train(resume=True)
 
 
+def test_a_resumed_training_keeps_the_first_sessions_plan_and_times_nothing(tokenizer, tmp_path, monkeypatch):
+    stop = tmp_path / "STOP"
+    stop.touch()
+    assert make_job(tokenizer, tmp_path / "out", timed_steps=2).train(stop_file=stop).paused
+    first = json.loads((tmp_path / "out" / _sessions.PLAN_FILE).read_text())
+    assert first["seconds_per_step"] is not None
+    stop.unlink()
+
+    def timed_again(*args, **kwargs):
+        raise AssertionError("a resumed training timed its steps again")
+
+    monkeypatch.setattr(_sessions, "time_steps", timed_again)
+    second = make_job(tokenizer, tmp_path / "out", timed_steps=2)
+    assert second.train(resume=True).steps == STEPS
+    plan = second.plan()
+    for name in ("micro_batch", "checkpointed_layers", "duration", "memory"):
+        assert plan[name].to_dict() == next(d for d in first["decisions"] if d["name"] == name)
+    assert (plan.seconds_per_step, plan.memory_request_bytes) == (first["seconds_per_step"],
+                                                                  first["memory_request_bytes"])
+
+
+def test_a_resume_without_a_checkpoint_is_refused_before_the_model_is_planned(tokenizer, tmp_path, monkeypatch):
+    def planned(self):
+        raise AssertionError("the model was planned")
+
+    monkeypatch.setattr(TrainingJob, "_prepare", planned)
+    with pytest.raises(FileNotFoundError, match="holds no checkpoint to resume from"):
+        make_job(tokenizer, tmp_path / "out").train(resume=True)
+
+
 def test_the_plan_is_not_timed_on_the_cpu_unless_asked(tokenizer, tmp_path):
     plan = make_job(tokenizer, tmp_path / "a").plan()
     duration = plan["duration"]
