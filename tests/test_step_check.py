@@ -41,7 +41,7 @@ def checked(monkeypatch, tiny_model, peaks, layout, given=False, per_layer=GIB):
     peaks = list(peaks)
     timed = []
 
-    def fake_time_steps(trainer, shape, accumulation, steps, eval_shape=None):
+    def fake_time_steps(trainer, shape, accumulation, steps, eval_shape=None, inputs_of=None):
         timed.append(getattr(model, "_meepsquared_gradient_checkpointing", None))
         peak = peaks.pop(0)
         if peak == "oom":

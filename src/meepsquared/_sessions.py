@@ -306,13 +306,22 @@ def peak_resident_bytes() -> int:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
 
 
-def time_steps(trainer, shape, accumulation: int, steps: int, eval_shape=None) -> Timing:
+def language_model_inputs(shape, device) -> dict:
+    """A batch of `shape` as a language model trains on it: its tokens, and the same tokens as the labels."""
+    inputs = shape.inputs(device)
+    inputs["labels"] = inputs["input_ids"]
+    return inputs
+
+
+def time_steps(trainer, shape, accumulation: int, steps: int, eval_shape=None,
+               inputs_of=language_model_inputs) -> Timing:
     """Time and measure `steps` optimizer steps after TIMING_WARMUP, and an evaluation pass (see Timing).
 
     A step is `accumulation` forward and backward passes of a batch of `shape`
     (an meepsquared._checkpointing.Shape), its loss computed by the trainer's
     compute_loss as the training computes it, the gradient clipped, and an
-    optimizer step; its time is the median of `steps`. With `eval_shape`, the
+    optimizer step; its time is the median of `steps`. inputs_of(shape, device)
+    makes the batch of a shape as the model takes it. With `eval_shape`, the
     loss of that batch in evaluation mode without gradients, as an evaluation
     computes it, is timed the same way. The GPU's peak is reset before the
     first step.
@@ -340,11 +349,8 @@ def time_steps(trainer, shape, accumulation: int, steps: int, eval_shape=None) -
     was_training = model.training
     optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(args, model)
     optimizer = optimizer_cls(trained, **optimizer_kwargs)
-    inputs = shape.inputs(device)
-    inputs["labels"] = inputs["input_ids"]
-    eval_inputs = eval_shape.inputs(device) if eval_shape is not None else None
-    if eval_inputs is not None:
-        eval_inputs["labels"] = eval_inputs["input_ids"]
+    inputs = inputs_of(shape, device)
+    eval_inputs = inputs_of(eval_shape, device) if eval_shape is not None else None
     # The loss is the trainer's own (compute_loss), as the training computes it: TRL's fused LM head or Liger's
     # fused loss never build the full logits. compute_loss also adds to the trainer's logged metrics and token
     # count, which are put back after.

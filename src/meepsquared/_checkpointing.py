@@ -109,14 +109,31 @@ class Shape:
         return f"{self.tokens:,} tokens ({len(self.lengths)} examples, end to end)"
 
 
+def _unwrapped(model):
+    return model.get_base_model() if hasattr(model, "get_base_model") else model
+
+
+def owner(model):
+    """The Transformers model whose layers train: the model itself, or, for a model that runs a Transformers model
+    inside (a tagger, see meepsquared._tagging), the one its meepsquared_trunk() names. Gradient checkpointing is
+    switched on and off on it, and its config is the one the layers run with."""
+    base = _unwrapped(model)
+    return _unwrapped(base.meepsquared_trunk()) if hasattr(base, "meepsquared_trunk") else base
+
+
+def trunk(model):
+    """What a measurement runs on a batch: the decoder of a language model, without its output layer, or the
+    encoder of a tagger."""
+    base = owner(model)
+    return base.get_decoder() if hasattr(base, "get_decoder") else base
+
+
 def layers(model) -> list:
-    """The model's checkpointable layers, in order: its decoder's. A multimodal model's vision and audio layers do
-    not run on text, so they are not counted, measured or laid out."""
+    """The model's checkpointable layers, in order: its decoder's, or a tagger's encoder's. A multimodal model's
+    vision and audio layers do not run on text, so they are not counted, measured or laid out."""
     from transformers.modeling_layers import GradientCheckpointingLayer
 
-    base = model.get_base_model() if hasattr(model, "get_base_model") else model
-    decoder = base.get_decoder() if hasattr(base, "get_decoder") else base
-    return [module for module in decoder.modules() if isinstance(module, GradientCheckpointingLayer)]
+    return [module for module in trunk(model).modules() if isinstance(module, GradientCheckpointingLayer)]
 
 
 def count(setting, total: int) -> int:
@@ -154,9 +171,9 @@ def set_checkpointed(model, checkpointed) -> int:
     Transformers gives every layer the whole-recompute checkpoint function; the
     selective layers get meepsquared's, with the policy for this model.
     """
-    base = model.get_base_model() if hasattr(model, "get_base_model") else model
+    base = owner(model)
     layout = checkpointed if isinstance(checkpointed, Recompute) else Recompute(checkpointed, 0)
-    all_layers = layers(base)
+    all_layers = layers(model)
     if layout.checkpointed > 0:
         base.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         base.enable_input_require_grads()
@@ -173,7 +190,6 @@ def set_checkpointed(model, checkpointed) -> int:
 
 def kinds(model) -> list:
     """How each layer trains now: "whole", "selective" or "none"."""
-    base = model.get_base_model() if hasattr(model, "get_base_model") else model
     def kind(layer) -> str:
         if not layer.gradient_checkpointing:
             return NONE
@@ -182,7 +198,7 @@ def kinds(model) -> list:
         selective = isinstance(function, _selective.SelectiveCheckpoint)
         return SELECTIVE if layer.__dict__.get("_meepsquared_selective", False) and selective else WHOLE
 
-    return [kind(layer) for layer in layers(base)]
+    return [kind(layer) for layer in layers(model)]
 
 
 def selective_possible(model) -> bool:
@@ -267,12 +283,13 @@ class _Measuring:
     """The model in training mode with its layers free to be laid out; put back as they were on exit."""
 
     def __init__(self, model):
-        self.base = model.get_base_model() if hasattr(model, "get_base_model") else model
+        self.base = _unwrapped(model)
         # The decoder alone: the output layer's logits (tokens by vocabulary, 15 GiB
         # for 32 rows of 1,024 tokens and a 250k vocabulary) hold the same with or
-        # without checkpointing, and a training with the fused loss never builds them
-        self.trunk = self.base.get_decoder() if hasattr(self.base, "get_decoder") else self.base
-        self.layers = layers(self.base)
+        # without checkpointing, and a training with the fused loss never builds them.
+        # A tagger's encoder alone: its heads hold the same with or without checkpointing
+        self.trunk = trunk(model)
+        self.layers = layers(model)
 
     def __enter__(self):
         self.state = [(layer.gradient_checkpointing, layer.__dict__.get("_meepsquared_selective", False),

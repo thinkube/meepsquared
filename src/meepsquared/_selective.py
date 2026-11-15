@@ -151,7 +151,11 @@ def lora_rank(model) -> int:
 
 
 def _base(model):
-    return model.get_base_model() if hasattr(model, "get_base_model") else model
+    """The Transformers model whose layers train, whose config names their attention (see
+    meepsquared._checkpointing.owner)."""
+    from meepsquared import _checkpointing
+
+    return _checkpointing.owner(model)
 
 
 def refusal(model, compiled: bool) -> Optional[str]:

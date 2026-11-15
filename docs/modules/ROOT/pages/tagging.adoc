@@ -1,0 +1,73 @@
+= Tagging and parsing
+:page-type: how-to
+
+_Training a token tagger and a dependency parser on a pretrained encoder such as XLM-RoBERTa._
+
+.TL;DR
+`TrainingJob(task="tagging")` trains heads for each column of labels in your data (UPOS, FEATS, lemmas, or your own) and, when the data has heads and relations, a biaffine dependency parser, all together on one frozen encoder. The encoder trains through bottleneck adapters or LoRA. Every epoch is scored on the evaluation data, and the best epoch is kept. `MeepTagger` loads the result to predict.
+
+== Train
+
+[source,python]
+----
+import meepsquared as m2
+
+job = m2.TrainingJob(model="FacebookAI/xlm-roberta-large", task="tagging", method="bottleneck",
+                     data="en_ewt-ud-train.conllu", eval_data="en_ewt-ud-dev.conllu", epochs=20)
+print(job.plan())
+result = job.train()
+result.save("ewt-tagger")
+----
+
+The plan says which tasks it found, how many labels each has, the batch, the layers recomputed, the time and the memory, as for any training job (see xref:training-job.adoc[Training jobs]).
+
+== The data
+
+* *A CoNLL-U file*, or a list of them for several treebanks. Each sentence gives the columns `tokens`, `lemma`, `upos`, `xpos`, `feats`, `head` and `deprel`. `Recipe(words="syntactic")`, the default, reads UD's words and leaves multi-word tokens out. `Recipe(words="surface")` keeps a multi-word token ("del" = de + el) as one token: its tags and lemmas are the parts' joined with `+`, its head that of its first part whose head lies outside it.
+* *A .jsonl, .json or .parquet file, or a `datasets.Dataset`*, with a `tokens` column (the words of each sentence) and one column per task, a value per word. Any column of text labels is a tagging task, for example `ner` or a label of your own. `head` (numbers from 1, 0 for the root) and `deprel` together are the parser.
+
+`Recipe(labels=[...])` chooses the tasks: column names, and `"parse"` for the parser. By default every column of labels is learned.
+
+A lemma is learned as an edit rule from the word: how many characters to remove from its end, what to add, and whether the lemma is lowercase. One class then covers every word inflected alike.
+
+Sentences with more subwords than the encoder takes (512 for XLM-RoBERTa, the special tokens counted) are left out, and the plan says how many.
+
+== The model
+
+* *The encoder* is frozen and shared.
+* *The adapter* trains it: `method="bottleneck"` puts a bottleneck adapter after the feed-forward block of every layer (Pfeiffer et al., 2020), `Recipe(bottleneck=256)` wide; `method="lora"` adds LoRA to the attention's projections and the dense layers, as `Recipe(rank=..., targets=[...])` says.
+* *A head per tagging task*: a linear layer on the encoder's output for the first subword of each word.
+* *The parser*: Dozat and Manning's biaffine scorer (2017). Every word scores every other word and the root as its head, and each relation given its head.
+
+The loss is the sum of every task's cross-entropy, the parser's heads and relations counted as two.
+
+== Batches and memory
+
+A batch is a budget of subwords per update, `Recipe(tokens_per_update=4096)` by default. Sentences are sorted by length and grouped, so that a padded batch pads little; the groups are shuffled every epoch. The plan measures the largest batch the training runs. If it does not fit, the budget is split over more micro-batches per update. The layers to recompute are chosen and checked by timed steps, as for a language model (see xref:unified-memory.adoc[GPUs that share the system's memory]).
+
+== What is kept
+
+At the end of every epoch the evaluation data is predicted and scored: each task's accuracy over all words and, with the parser, UAS (the right head) and LAS (the right head and relation). The scores are logged with the training's metrics and written to `tagging-scores.jsonl` in the output folder. `result.evaluations` holds them too.
+
+`Recipe(keep=...)` chooses the weights the training ends with:
+
+* `"best"`, the default with evaluation data: the epoch with the best score, the mean of each task's accuracy and LAS;
+* `"last"`: the last step's;
+* `"averaged"`: the mean of the weights of the last `Recipe(average_last=N)` epochs.
+
+== Predict
+
+[source,python]
+----
+tagger = m2.MeepTagger.from_pretrained("ewt-tagger")
+tagger.predict([["The", "hare", "runs", "fast", "."]])
+# [{"upos": [...], "lemma": [...], "head": [...], "deprel": [...]}]
+----
+
+The saved folder holds the adapter, the heads, their labels and the tokenizer. The encoder is the pretrained one the training named; `encoder=` gives another path to the same model, such as a local copy.
+
+Heads are decoded as a tree with one root (Chu-Liu-Edmonds), UD's rule. `predict(..., decode="argmax")` takes each word's best head instead, which is not always a tree.
+
+== Defaults
+
+The learning rate (5e-4), the linear schedule with a 6% warm-up, the weight decay (0.01), the dropout (0.2), the bottleneck width (256) and the budget (4,096 subwords) are the settings texplicit trains its XLM-RoBERTa taggers and parsers with. They are not yet compared with others; the plan says so beside each.
