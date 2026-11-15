@@ -771,7 +771,8 @@ class TrainingJob:
         if self.eval_every is not None and self.eval_data is None and self.eval_share is None:
             raise ValueError("eval_every: no evaluation data; give eval_data or eval_share")
         if self.task == "grpo" and (self.eval_data is not None or self.eval_share is not None):
-            raise ValueError("eval_data and eval_share are SFT and tagging settings: GRPO's reward is its measure")
+            raise ValueError("eval_data and eval_share are SFT settings and tagging settings: GRPO's reward is its "
+                             "measure")
         if self.task != "sft" and self.preprocessed is not None:
             raise ValueError("preprocessed is an SFT setting: GRPO's prompts are not tokenized ahead")
         if self.task == "grpo" and self.timed_steps:

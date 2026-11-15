@@ -55,7 +55,7 @@ def encoder_path(tmp_path):
 @pytest.fixture
 def treebank(tmp_path):
     sentences = [["the", "hare", "runs", "fast", "."], ["the", "sloth", "sleeps", "."],
-                 ["a", "slow", "sloth", "and", "the", "hare", "."], ["the", "hare", "sleeps", "."]]
+                 ["a", "slow", "sloth", "and", "the", "hare", "sleeps", "."], ["the", "hare", "sleeps", "."]]
     upos = {"the": "DET", "a": "DET", "hare": "NOUN", "sloth": "NOUN", "runs": "VERB", "sleeps": "VERB",
             "fast": "ADV", "slow": "ADJ", "and": "CCONJ", ".": "PUNCT"}
     rows = []
