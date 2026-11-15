@@ -8,6 +8,13 @@
     print(job.plan())
     job.train().save("out")
 
+Token tagging and dependency parsing on an encoder (see meepsquared._tagging):
+
+    job = m2.TrainingJob(model="FacebookAI/xlm-roberta-large", task="tagging", method="bottleneck",
+                         data="train.conllu", eval_data="dev.conllu", epochs=20)
+    job.train().save("tagger")
+    m2.MeepTagger.from_pretrained("tagger").predict([["The", "hare", "runs", "."]])
+
 The calls code coming from Unsloth uses stay (see meepsquared.models):
 
     model, tokenizer = m2.MeepLanguageModel.from_pretrained("org/model", load_in_4bit=True)
@@ -29,9 +36,10 @@ from meepsquared import _trl, _varlen, _vllm  # noqa: E402
 from meepsquared.job import Overrides, Plan, Recipe, Result, TrainingJob  # noqa: E402
 from meepsquared.models import MeepLanguageModel, MeepModel  # noqa: E402
 from meepsquared.multi_gpu import fsdp_config  # noqa: E402
+from meepsquared.tagger import MeepTagger  # noqa: E402
 
 __version__ = "0.1.0"
-__all__ = ["TrainingJob", "Recipe", "Overrides", "Plan", "Result", "MeepLanguageModel", "MeepModel",
+__all__ = ["TrainingJob", "Recipe", "Overrides", "Plan", "Result", "MeepLanguageModel", "MeepModel", "MeepTagger",
            "fsdp_config", "__version__"]
 
 _trl.patch_trainers()

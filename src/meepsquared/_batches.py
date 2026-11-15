@@ -207,17 +207,25 @@ class Layout:
 
 
 def lay_out(lengths: list, loading: Loading, accumulation: int, steps: Optional[int], epochs: Optional[float],
-            micro: Optional[int] = None, budget: Optional[int] = None, kinds: Optional[list] = None) -> Layout:
+            micro: Optional[int] = None, budget: Optional[int] = None, kinds: Optional[list] = None,
+            by_length: bool = False) -> Layout:
     """The micro-batches of a training of `steps` updates, or `epochs` (one when neither), `accumulation`
     micro-batches an update; each micro-batch `micro` examples, or as many as fit `budget` tokens.
 
     With `kinds` (each example's), each micro-batch holds examples of one
     kind: the epoch's order is cut kind by kind, and its micro-batches are
     then shuffled by the same generator, so that the kinds mix in the order.
+
+    by_length, with a budget: the epoch's shuffled order is sorted by length
+    (examples of one length stay in the shuffled order), grouped, and the
+    groups shuffled by the same generator. A padded group then holds examples
+    of about one length, and pads little.
     """
     if (micro is None) == (budget is None):
         raise ValueError("a layout takes micro (examples per micro-batch) or budget (tokens per micro-batch), "
                          "one of them")
+    if by_length and (budget is None or kinds is not None):
+        raise ValueError("by_length groups a token budget's micro-batches, without kinds")
     if not lengths:
         raise ValueError("the training data has no examples")
 
@@ -227,6 +235,13 @@ def lay_out(lengths: list, loading: Loading, accumulation: int, steps: Optional[
         return groups(lengths, order, budget, loading.padded, loading.multiple)
 
     def epoch(index: int) -> list:
+        if by_length:
+            import torch
+
+            generator = torch.Generator().manual_seed(loading.seed + index)
+            order = sorted(torch.randperm(len(lengths), generator=generator).tolist(), key=lengths.__getitem__)
+            made = batches_of(order)
+            return [made[i] for i in torch.randperm(len(made), generator=generator).tolist()]
         if kinds is None:
             return batches_of(shuffled(len(lengths), loading.seed, index))
         import torch

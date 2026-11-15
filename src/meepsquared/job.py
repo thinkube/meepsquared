@@ -34,10 +34,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-TASKS = ("sft", "grpo")
-METHODS = ("lora", "qlora", "fp8")
-METHOD_NAMES = {"lora": "LoRA", "qlora": "QLoRA", "fp8": "LoRA on FP8 weights"}
-SCHEDULES = ("constant", "cosine")
+TASKS = ("sft", "grpo", "tagging")
+METHODS = ("lora", "qlora", "fp8", "bottleneck")
+METHOD_NAMES = {"lora": "LoRA", "qlora": "QLoRA", "fp8": "LoRA on FP8 weights", "bottleneck": "bottleneck adapters"}
+# The methods of a tagging job (see meepsquared._tagging_job)
+TAGGING_METHODS = ("lora", "bottleneck")
+SCHEDULES = ("constant", "cosine", "linear")
+# The Recipe fields of a tagging job alone
+TAGGING_RECIPE = ("labels", "words", "bottleneck", "head_dropout", "keep", "average_last", "decode")
+# The Recipe fields a tagging job refuses
+NOT_TAGGING_RECIPE = ("effective_batch", "experts", "answers_only", "max_cut_share", "source_weights")
 # The file types a local data file can have, and the datasets builder that reads each
 DATA_SUFFIXES = {".jsonl": "json", ".json": "json", ".parquet": "parquet"}
 
@@ -252,6 +258,17 @@ class Recipe:
     max_completion_length (tokens per completion), temperature, top_p and
     top_k (the sampling), chat_template_kwargs (arguments of the chat
     template, such as {"enable_thinking": False}).
+    Tagging only (see meepsquared._tagging): labels, the tasks to learn, the
+    data's columns of labels and "parse" for the parser (every one the data
+    has); words, how a CoNLL-U file is read, "syntactic" (UD's words) or
+    "surface" (a multi-word token as one); bottleneck, the width of the
+    bottleneck adapters (256); head_dropout, the dropout on the words'
+    vectors and in the parser (0.2); keep, the weights the training ends
+    with, "best" (the epoch of the best evaluation score, with evaluation
+    data), "last" or "averaged" (the mean of the last average_last
+    epochs'); decode, the parser's heads as a tree with one root, "mst", or
+    each word's best head, "argmax". schedule also takes "linear", a tagger's
+    default (decay to 0 after the warm-up).
     """
 
     rank: Optional[int] = None
@@ -277,8 +294,32 @@ class Recipe:
     chat_template_kwargs: Optional[dict] = None
     max_cut_share: Optional[float] = None
     source_weights: Optional[dict] = None
+    labels: Optional[list] = None
+    words: Optional[str] = None
+    bottleneck: Optional[int] = None
+    head_dropout: Optional[float] = None
+    keep: Optional[str] = None
+    average_last: Optional[int] = None
+    decode: Optional[str] = None
 
     def __post_init__(self):
+        from meepsquared import _tagging, _tagging_job
+
+        _check_positive("bottleneck", self.bottleneck)
+        _check_positive("average_last", self.average_last)
+        if self.labels is not None and (not isinstance(self.labels, list) or not self.labels
+                                        or not all(isinstance(name, str) for name in self.labels)):
+            raise ValueError(f"labels must be a non-empty list of column names, or 'parse', not {self.labels!r}")
+        if self.words is not None and self.words not in _tagging.WORDS:
+            raise ValueError(f"words must be one of {_tagging.WORDS}, not {self.words!r}")
+        if self.keep is not None and self.keep not in _tagging_job.KEEPS:
+            raise ValueError(f"keep must be one of {_tagging_job.KEEPS}, not {self.keep!r}")
+        if self.decode is not None and self.decode not in _tagging.DECODES:
+            raise ValueError(f"decode must be one of {_tagging.DECODES}, not {self.decode!r}")
+        if self.head_dropout is not None and (isinstance(self.head_dropout, bool)
+                                              or not isinstance(self.head_dropout, (int, float))
+                                              or not 0 <= self.head_dropout < 1):
+            raise ValueError(f"head_dropout must be at least 0 and below 1, not {self.head_dropout!r}")
         for name in ("rank", "alpha", "effective_batch", "max_length", "generations", "max_completion_length"):
             _check_positive(name, getattr(self, name))
         if self.tokens_per_update != AUTO and (isinstance(self.tokens_per_update, bool) or not (
@@ -505,14 +546,36 @@ class Result:
 
     def save(self, path, merged: bool = False) -> None:
         """The adapter alone, or with merged=True the base model with the adapter merged into 16-bit weights."""
-        from meepsquared import _save
+        from meepsquared import _save, _tagging
 
+        tagger = getattr(self._model, "_meepsquared", {}).get("tagger")
+        if tagger is not None:
+            if merged:
+                raise ValueError("a tagger is saved as its adapter and heads on the pretrained encoder; merged=True "
+                                 "is for a language model")
+            _tagging.save(self._model, path, tagger)
+            if self._tokenizer is not None:
+                self._tokenizer.save_pretrained(path)
+            return
         _save.save(self._model, path, tokenizer=self._tokenizer, save_method="merged_16bit" if merged else "lora")
 
     def to_dict(self) -> dict:
         return {"steps": self.steps, "seconds": self.seconds, "final_loss": self.final_loss,
                 "peak_memory_bytes": self.peak_memory_bytes, "output": self.output, "paused": self.paused,
                 "checkpoint": self.checkpoint, "evaluations": self.evaluations, "milestones": self.milestones}
+
+
+def _files(data) -> bool:
+    """Whether data is a dataset id, a file, or a list of files: what a job written as data can hold."""
+    if isinstance(data, (str, os.PathLike)):
+        return True
+    return isinstance(data, (list, tuple)) and bool(data) and all(isinstance(d, (str, os.PathLike)) for d in data)
+
+
+def _as_data(data):
+    if data is None:
+        return None
+    return [str(d) for d in data] if isinstance(data, (list, tuple)) else str(data)
 
 
 def load_yaml(text: str):
@@ -678,6 +741,16 @@ class TrainingJob:
             raise ValueError(f"task must be one of {TASKS}, not {self.task!r}")
         if self.method not in METHODS:
             raise ValueError(f"method must be one of {METHODS}, not {self.method!r}")
+        if self.task == "tagging":
+            self._check_tagging()
+        else:
+            if self.method == "bottleneck":
+                raise ValueError("method 'bottleneck' trains a tagger (task 'tagging'); a language model trains LoRA")
+            for name in TAGGING_RECIPE:
+                if getattr(self.recipe, name) is not None:
+                    raise ValueError(f"recipe.{name} is a tagging setting")
+            if self.recipe.schedule == "linear":
+                raise ValueError("schedule 'linear' is a tagger's; a language model's is 'constant' or 'cosine'")
         if self.steps is not None and self.epochs is not None:
             raise ValueError("give steps or epochs, not both")
         _check_positive("steps", self.steps)
@@ -697,11 +770,11 @@ class TrainingJob:
         _check_positive("eval_every", self.eval_every)
         if self.eval_every is not None and self.eval_data is None and self.eval_share is None:
             raise ValueError("eval_every: no evaluation data; give eval_data or eval_share")
-        if self.task != "sft" and (self.eval_data is not None or self.eval_share is not None):
-            raise ValueError("eval_data and eval_share are SFT settings: GRPO's reward is its measure")
+        if self.task == "grpo" and (self.eval_data is not None or self.eval_share is not None):
+            raise ValueError("eval_data and eval_share are SFT and tagging settings: GRPO's reward is its measure")
         if self.task != "sft" and self.preprocessed is not None:
             raise ValueError("preprocessed is an SFT setting: GRPO's prompts are not tokenized ahead")
-        if self.task != "sft" and self.timed_steps:
+        if self.task == "grpo" and self.timed_steps:
             raise ValueError("timed_steps: the plan times SFT's steps; GRPO's steps generate their completions")
         if self.task == "grpo" and not self.rewards:
             raise ValueError("rewards: required for GRPO, a list of reward functions")
@@ -721,7 +794,7 @@ class TrainingJob:
             raise ValueError("recipe.max_cut_share and recipe.source_weights are SFT settings")
         if self.task != "sft" and self.recipe.answers_only is not None:
             raise ValueError("recipe.answers_only is an SFT setting; GRPO's loss is on the completions already")
-        if self.task != "sft" and self.recipe.tokens_per_update is not None:
+        if self.task == "grpo" and self.recipe.tokens_per_update is not None:
             raise ValueError("recipe.tokens_per_update is an SFT setting; GRPO's batch counts completions, "
                              "recipe.effective_batch")
         if self.milestones is not None and (isinstance(self.milestones, bool)
@@ -747,6 +820,43 @@ class TrainingJob:
                 or (isinstance(self.report_to, (list, tuple)) and all(isinstance(r, str) for r in self.report_to))):
             raise ValueError(f"report_to must be a name such as 'mlflow', or a list of names, not {self.report_to!r}")
 
+    def _check_tagging(self) -> None:
+        """What a tagging job takes (see meepsquared._tagging_job), and what it refuses."""
+        if self.method not in TAGGING_METHODS:
+            raise ValueError(f"a tagger trains {' or '.join(repr(m) for m in TAGGING_METHODS)}, not {self.method!r}")
+        if not isinstance(self.model, (str, os.PathLike)):
+            raise ValueError("model: a tagging job loads its encoder; give a model id or a path")
+        if self.tokenizer is not None:
+            raise ValueError("tokenizer: a tagging job loads the encoder's own")
+        if self.data is None:
+            raise ValueError("data: required, a CoNLL-U file, a .jsonl, .json or .parquet file with a 'tokens' "
+                             "column, a list of them, or a datasets.Dataset")
+        if self.split != SPLIT:
+            raise ValueError("split is the split of a Hugging Face dataset id, which a tagging job does not read")
+        for name, value in (("rewards", self.rewards), ("milestones", self.milestones),
+                            ("milestone_eval", self.milestone_eval), ("preprocessed", self.preprocessed),
+                            ("eval_every", self.eval_every)):
+            if value is not None:
+                raise ValueError(f"{name} is not a tagging setting"
+                                 + ("; a tagger is scored at the end of every epoch" if name == "eval_every" else ""))
+        for name in ("liger", "padding_free", "fused_lora", "compile_layers", "micro_batch", "vllm",
+                     "milestone_engine"):
+            if getattr(self.overrides, name) is not None:
+                raise ValueError(f"overrides.{name} is not a tagging setting")
+        for name in NOT_TAGGING_RECIPE:
+            if getattr(self.recipe, name) is not None:
+                raise ValueError(f"recipe.{name} is not a tagging setting"
+                                 + ("; a tagger's batch is recipe.tokens_per_update" if name == "effective_batch"
+                                    else ""))
+        if self.recipe.tokens_per_update == AUTO:
+            raise ValueError("recipe.tokens_per_update: a tagger's budget is a number of subwords; 'auto' is SFT's")
+        if self.method == "bottleneck":
+            for name in ("rank", "alpha", "dropout", "targets"):
+                if getattr(self.recipe, name) is not None:
+                    raise ValueError(f"recipe.{name} is a LoRA setting, and the method is 'bottleneck'")
+        elif self.recipe.bottleneck is not None:
+            raise ValueError("recipe.bottleneck is the width of bottleneck adapters, and the method is 'lora'")
+
     # The job as data
 
     @classmethod
@@ -761,20 +871,22 @@ class TrainingJob:
     def to_dict(self) -> dict:
         if not isinstance(self.model, str):
             raise ValueError("model is a loaded model; only a model id or a path can be written as data")
-        if self.data is not None and not isinstance(self.data, (str, os.PathLike)):
-            raise ValueError("data is a datasets.Dataset; only a dataset id or a file can be written as data")
+        if self.data is not None and not _files(self.data):
+            raise ValueError("data is a datasets.Dataset; only a dataset id, a file or a list of files can be written "
+                             "as data")
         if self.tokenizer is not None:
             raise ValueError("tokenizer is a loaded tokenizer, which cannot be written as data")
-        if self.eval_data is not None and not isinstance(self.eval_data, (str, os.PathLike)):
-            raise ValueError("eval_data is a loaded dataset; only a dataset id or a file can be written as data")
+        if self.eval_data is not None and not _files(self.eval_data):
+            raise ValueError("eval_data is a loaded dataset; only a dataset id, a file or a list of files can be "
+                             "written as data")
         if self.milestone_eval is not None and not isinstance(self.milestone_eval, (str, os.PathLike)):
             raise ValueError("milestone_eval is loaded rows; only a .jsonl file can be written as data")
-        out = {"model": self.model, "data": str(self.data) if self.data is not None else None, "task": self.task,
+        out = {"model": str(self.model), "data": _as_data(self.data), "task": self.task,
                "method": self.method, "steps": self.steps, "epochs": self.epochs,
                "rewards": [reward_name(r) for r in self.rewards] if self.rewards else None,
                "output": str(self.output) if self.output is not None else None, "split": self.split,
                "report_to": list(self.report_to) if isinstance(self.report_to, tuple) else self.report_to,
-               "eval_data": str(self.eval_data) if self.eval_data is not None else None,
+               "eval_data": _as_data(self.eval_data),
                "eval_split": self.eval_split, "eval_share": self.eval_share, "eval_every": self.eval_every,
                "timed_steps": self.timed_steps, "milestones": self.milestones,
                "preprocessed": str(self.preprocessed) if self.preprocessed is not None else None,
@@ -899,6 +1011,9 @@ class TrainingJob:
         losses = [entry["loss"] for entry in state.log_history if "loss" in entry]
         evaluations = [{"step": entry["step"], "eval_loss": entry["eval_loss"]} for entry in state.log_history
                        if "eval_loss" in entry]
+        if self.task == "tagging":
+            # Every epoch's scores, a resumed training's earlier sessions' too
+            evaluations = list(prepared.scores.records)
         if status is not None:
             status.update(state="paused" if paused else "completed", step=state.global_step, checkpoint=latest)
         return Result(steps=state.global_step, seconds=seconds, final_loss=losses[-1] if losses else None,
@@ -1224,6 +1339,11 @@ class TrainingJob:
 
     def _prepare(self) -> _Prepared:
         if self._prepared is not None:
+            return self._prepared
+        if self.task == "tagging":
+            from meepsquared import _tagging_job
+
+            self._prepared = _tagging_job.prepare(self)
             return self._prepared
         import torch
 
@@ -1934,7 +2054,8 @@ ORDER = ["loading", "allocator_cap", "weights", "attention", "padding_free", "li
          "alpha", "dropout", "targets", "experts", "optimizer", "learning_rate", "schedule", "warmup_steps",
          "max_grad_norm", "weight_decay", "length", "duration", "memory", "evaluation", "milestones", "milestone_engine",
          "data_checks",
-         "source_weights", "max_length", "answers_only",
+         "source_weights", "max_length", "answers_only", "labels", "words", "bottleneck", "head_dropout", "keep",
+         "decode",
          "generations",
          "max_completion_length", "temperature", "top_p", "top_k", "chat_template_kwargs", "data", "report_to",
          "output"]
@@ -1981,7 +2102,7 @@ def _liger_text(args) -> str:
 
 
 def _timed_steps_fitting(trainer, peft_model, shape, accumulation: int, timed: int, eval_shape, layout, figures,
-                         layer_count: int, device, layout_given: bool, margin: Optional[int]):
+                         layer_count: int, device, layout_given: bool, margin: Optional[int], inputs_of=None):
     """Time the steps on the largest micro-batch (meepsquared._sessions.time_steps) and check their real peak
     against the memory.
 
@@ -1993,19 +2114,21 @@ def _timed_steps_fitting(trainer, peft_model, shape, accumulation: int, timed: i
     layout fits, the layouts between it and the last that did not are
     timed the same way, until none is left between. A layout given by hand
     is not changed: the error says what happened. Returns (timing, layout,
-    text), the text saying what was corrected, "" when nothing.
+    text), the text saying what was corrected, "" when nothing. inputs_of: how a batch of a shape is made (see
+    meepsquared._sessions.time_steps), a language model's when None.
     """
     import torch
 
     from meepsquared import _checkpointing, _sessions
 
+    inputs_of = inputs_of if inputs_of is not None else _sessions.language_model_inputs
     budget = _checkpointing.peak_budget(device, margin) if margin is not None else None
     corrected = ""
     failed = None  # the most layers recomputed whole that did not fit
     fitting = None  # (layers recomputed whole, timing, layout) of the fewest that fit
     for attempt in range(TIMING_ATTEMPTS):
         try:
-            timing = _sessions.time_steps(trainer, shape, accumulation, timed, eval_shape)
+            timing = _sessions.time_steps(trainer, shape, accumulation, timed, eval_shape, inputs_of)
             peak = timing.peak_gpu_allocated_bytes
             if budget is None or peak is None or peak <= budget:
                 if fitting is None or layout.whole < fitting[0]:
