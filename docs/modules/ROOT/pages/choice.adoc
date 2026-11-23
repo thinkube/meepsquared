@@ -40,7 +40,7 @@ How a row is read: the chat template is rendered with the last user message's co
 
 == The model and the head
 
-The model is loaded as for SFT, with `method="lora"` or `"qlora"`, without Liger, and with the attention `"sdpa"` unless `Overrides(attention=...)` says otherwise. For a model with vision and audio towers (Gemma 4), the text model is used. LoRA goes on every linear layer named `q_proj`, `k_proj`, `v_proj` or `o_proj` outside the vision, audio and image modules (`Recipe(targets=...)` changes the names). Its defaults are rank 16, alpha 32 and dropout 0.05.
+The model is loaded as for SFT, with `method="lora"` or `"qlora"`, without Liger, and with the attention `"sdpa"` unless `Overrides(attention=...)` says otherwise. With `"qlora"` the weights are NF4 computing in bfloat16, without double quantization: the quantization the reference training (NanoJev's on Gemma 4 E4B) used, so that a training it started goes on over the same base weights. For a model with vision and audio towers (Gemma 4), the text model is used. LoRA goes on every linear layer named `q_proj`, `k_proj`, `v_proj` or `o_proj` outside the vision, audio and image modules (`Recipe(targets=...)` changes the names). Its defaults are rank 16, alpha 32 and dropout 0.05.
 
 `Recipe(choice_head=...)` chooses the head:
 
