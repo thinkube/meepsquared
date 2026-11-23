@@ -63,6 +63,10 @@ WEIGHT_DECAY = 0.0
 MAX_GRAD_NORM = 1.0
 SCHEDULE = "ramped_linear"
 ATTENTION = "sdpa"
+# The 4-bit quantization of method "qlora": the reference training's, NF4 computing in bfloat16 without double
+# quantization, so that an adapter trained on its base weights trains on the same weights here
+QLORA_DTYPE = torch.bfloat16
+QLORA_DOUBLE_QUANT = False
 # The seed of the head's initial weights (Transformers' default seed)
 SEED = 42
 NANOJEV = "the setting NanoJev's head was trained with on Gemma 4 E4B"
@@ -279,8 +283,9 @@ def _load(job, decisions: list):
                                   str(model.config._attn_implementation), "as the model was loaded"))
         return model
     attention = overrides.attention if overrides.attention is not None else ATTENTION
+    four_bit = {"dtype": QLORA_DTYPE, "double_quant": QLORA_DOUBLE_QUANT} if job.method == "qlora" else {}
     model, _ = MeepLanguageModel.from_pretrained(job.model, load_in_4bit=job.method == "qlora", liger=False,
-                                                 attn_implementation=attention)
+                                                 attn_implementation=attention, **four_bit)
     device = next(model.parameters()).device
     decisions.append(Decision("loading", "loading", "whole", f"to {device}", "as an SFT job loads it, without Liger: "
                               "the hidden states are read, not the language model's loss"))
@@ -321,9 +326,13 @@ def prepare(job):
     model = _load(job, decisions)
     dtype = model.get_input_embeddings().weight.dtype
     dtype_name = str(dtype).removeprefix("torch.")
-    decisions.append(Decision("weights", "weights", job.method,
-                              f"4-bit NF4, computing in {dtype_name}" if job.method == "qlora" else dtype_name,
-                              f"method {job.method}; the head in float32"))
+    if job.method == "qlora":
+        decisions.append(Decision("weights", "weights", job.method,
+                                  f"4-bit NF4 without double quantization, computing in {dtype_name}; the head in "
+                                  "float32", "the quantization the reference training used"))
+    else:
+        decisions.append(Decision("weights", "weights", job.method, dtype_name,
+                                  f"method {job.method}; the head in float32"))
     rank = recipe.rank if recipe.rank is not None else RANK
     alpha = recipe.alpha if recipe.alpha is not None else ALPHA
     dropout = recipe.dropout if recipe.dropout is not None else DROPOUT

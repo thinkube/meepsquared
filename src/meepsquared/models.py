@@ -253,6 +253,15 @@ def _adapters_off_fp8(peft_model) -> int:
     return len(fp8)
 
 
+def four_bit_config(dtype: torch.dtype, double_quant: bool = True, quant_storage: Optional[torch.dtype] = None):
+    """Transformers' BitsAndBytesConfig of NF4 weights computing in `dtype`, with or without double quantization."""
+    from transformers import BitsAndBytesConfig
+
+    return BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=dtype,
+                              bnb_4bit_use_double_quant=double_quant,
+                              **({"bnb_4bit_quant_storage": quant_storage} if quant_storage else {}))
+
+
 class MeepLanguageModel:
     @staticmethod
     def from_pretrained(
@@ -269,6 +278,7 @@ class MeepLanguageModel:
         trust_remote_code: bool = False,
         fast_inference: bool = False,
         quant_storage: Optional[torch.dtype] = None,
+        double_quant: bool = True,
         shared_vllm: Optional[dict] = None,
         **kwargs,
     ):
@@ -291,6 +301,8 @@ class MeepLanguageModel:
             its engine, {"max_lora_rank", "kv_cache_bytes", "max_model_len"}.
             The model then has the engine in model._meepsquared["engine"].
             Not with load_in_4bit; on one GPU.
+        double_quant: with load_in_4bit, the quantization constants quantized
+            too (QLoRA's double quantization); False keeps them in 32 bits.
         quant_storage: the dtype bitsandbytes packs the 4-bit weights in; under
             FSDP2 the model's dtype (torch.bfloat16), so that a layer's weights
             share one dtype to be sharded.
@@ -329,11 +341,7 @@ class MeepLanguageModel:
         hub = {"token": token, "trust_remote_code": trust_remote_code}
         quantization = None
         if load_in_4bit:
-            from transformers import BitsAndBytesConfig
-
-            quantization = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
-                                              bnb_4bit_compute_dtype=dtype, bnb_4bit_use_double_quant=True,
-                                              **({"bnb_4bit_quant_storage": quant_storage} if quant_storage else {}))
+            quantization = four_bit_config(dtype, double_quant, quant_storage)
         # One process per GPU (torchrun, accelerate launch) puts the model on its own GPU
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         device_map = device_map if device_map is not None else {"": local_rank}

@@ -366,3 +366,28 @@ def test_a_choice_job_is_data_and_back():
                                        head_only=500, schedule="ramped_linear"))
     again = TrainingJob.from_dict(job.to_dict())
     assert again.to_dict() == job.to_dict() and again.start_from == "state.pt"
+
+
+def test_qlora_quantizes_as_the_reference_training_did(monkeypatch):
+    from meepsquared import models
+
+    seen = {}
+
+    class Loaded(Exception):
+        pass
+
+    def from_pretrained(name, **kwargs):
+        seen.update(kwargs)
+        raise Loaded
+
+    monkeypatch.setattr(models.MeepLanguageModel, "from_pretrained", staticmethod(from_pretrained))
+    job = TrainingJob(model="org/model", task="choice", method="qlora", data="d.jsonl")
+    with pytest.raises(Loaded):
+        _choice_job._load(job, [])
+    assert seen["load_in_4bit"] and not seen["liger"] and seen["attn_implementation"] == "sdpa"
+    config = models.four_bit_config(seen["dtype"], seen["double_quant"])
+    assert config.load_in_4bit and config.bnb_4bit_quant_type == "nf4"
+    assert config.bnb_4bit_compute_dtype == torch.bfloat16
+    assert config.bnb_4bit_use_double_quant is False
+    # SFT's QLoRA keeps double quantization
+    assert models.four_bit_config(torch.bfloat16).bnb_4bit_use_double_quant is True
