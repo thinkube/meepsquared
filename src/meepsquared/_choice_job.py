@@ -179,10 +179,12 @@ class ChoiceTrainer(Trainer):
         if resume_from_checkpoint is not None or self.settings["start"] is None:
             return super().train(resume_from_checkpoint=resume_from_checkpoint, **kwargs)
         from transformers.trainer import TRAINER_STATE_NAME
-        from transformers.trainer_callback import TrainerState
+        from transformers.trainer_callback import ExportableState, TrainerState
 
         with tempfile.TemporaryDirectory(prefix="meepsquared-start-") as folder:
-            state = TrainerState()
+            # The callbacks' states as the Trainer records them in a state of its own
+            state = TrainerState(stateful_callbacks=[cb for cb in self.callback_handler.callbacks + [self.control]
+                                                     if isinstance(cb, ExportableState)])
             state.compute_steps(self.args, self.args.max_steps)
             state.global_step = self.settings["start_step"]
             state.max_steps = self.args.max_steps
@@ -240,8 +242,11 @@ class ChoiceMilestones(_milestones.Milestones):
         if self.report is not None:
             self.report.evaluating += time.perf_counter() - began
         if record.get("scores"):
+            # Logging resets the step's own log, which the trainer writes after this callback: it is kept
+            logs_the_step = control.should_log
             self.trainer.log({f"milestone/{group}/{metric}": value
                               for group, figures in record["scores"].items() for metric, value in figures.items()})
+            self.trainer.control.should_log = logs_the_step
         self._report(state)
 
 
@@ -431,8 +436,8 @@ def prepare(job):
         args.update(eval_strategy="steps", eval_steps=every, prediction_loss_only=True)
     training_args = ChoiceArguments(**args)
     # One process trains on its one GPU: the Trainer's DataParallel would split a question
-    _ = training_args.device
-    training_args._n_gpu = 1
+    if training_args.n_gpu > 1:
+        training_args._n_gpu = 1
     settings = {"rows": rows, "eval_rows": eval_rows, "head_only": head_only, "effective_batch": effective,
                 "learning_rate": rate, "head_learning_rate": head_rate, "weight_decay": weight_decay,
                 "warmup_steps": warmup, "config": config, "start": start, "start_step": start_step}

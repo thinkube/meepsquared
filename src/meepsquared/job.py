@@ -823,7 +823,8 @@ class TrainingJob:
             raise ValueError("eval_data and eval_share are SFT settings and tagging settings: GRPO's reward is its "
                              "measure")
         if self.task not in ("sft", "choice") and self.preprocessed is not None:
-            raise ValueError("preprocessed is an SFT and choice setting: GRPO's prompts are not tokenized ahead")
+            raise ValueError("preprocessed is an SFT setting, and a choice setting: GRPO's prompts are not tokenized "
+                             "ahead")
         if self.task == "grpo" and self.timed_steps:
             raise ValueError("timed_steps: the plan times SFT's steps; GRPO's steps generate their completions")
         if self.task == "grpo" and not self.rewards:

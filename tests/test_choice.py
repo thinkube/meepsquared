@@ -170,7 +170,7 @@ class Adapter(TrainerCallback):
 
     def on_step_end(self, args, state, control, model=None, **kwargs):
         chooser = self.model
-        self.sums[state.global_step] = sum(float(p.abs().sum()) for n, p in zip(chooser.adapter_names,
+        self.sums[state.global_step] = sum(float(p.detach().abs().sum()) for n, p in zip(chooser.adapter_names,
                                                                                  chooser.adapter()) if "lora_B" in n)
 
 
