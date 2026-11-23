@@ -467,7 +467,7 @@ def prepare(job):
     else:
         decisions.append(Decision("evaluation", "evaluation", None, "none", "no eval_data given"))
     decisions.append(Decision("data", "data", report["source"],
-                              f"{report['source']}: {report['text']}", f"preprocessed in {folder}"))
+                              f"{report['source']}: {report['decision']['text']}", f"preprocessed in {folder}"))
     decisions.append(Decision("output", "output", output, output,
                               "as given" if job.output is not None else "named after the model and the task"))
     reported = list(trainer.args.report_to or [])

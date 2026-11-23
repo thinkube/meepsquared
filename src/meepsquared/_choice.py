@@ -62,6 +62,8 @@ ANSWERS = "answers.jsonl"
 SUM_TOLERANCE = 1e-6
 # The marker the last user message's content ends with when the chat template is rendered
 MARKER = "\x00"
+# The shape of a preprocessed folder's files and report; part of its key, so a folder of another shape is not read
+FORMAT = 2
 # The prefix of the head's parameters among the trainable ones, in a saved state
 HEAD_PREFIX = "head."
 # The keys of a start_from file, and of each parameter's optimizer state in it
@@ -507,7 +509,7 @@ def inputs(job, tokenizer) -> dict:
         for item in (data if isinstance(data, (list, tuple)) else [data] if data is not None else []):
             if not isinstance(item, (str, os.PathLike)) or not Path(item).is_file():
                 raise FileNotFoundError(f"{where}: no file {item}")
-    return {"key_version": _preprocess.KEY_VERSION, "task": "choice", "data": _identity(job.data),
+    return {"key_version": _preprocess.KEY_VERSION, "task": "choice", "format": FORMAT, "data": _identity(job.data),
             "eval_data": _identity(job.eval_data) if job.eval_data is not None else None,
             "tokenizer": _preprocess.tokenizer_identity(tokenizer), "versions": _preprocess.versions()}
 
@@ -543,7 +545,7 @@ def preprocess(job, cache_dir, say=print):
     target = cache_dir / key
     if _preprocess.found(target, key_inputs):
         report = _preprocess.report_of(target)
-        say(f"preprocessed data found in {target}: {report['text']}")
+        say(f"preprocessed data found in {target}: {report['decision']['text']}")
         return _preprocess.Outcome(str(target), key, True, report)
     rows, source = read_encoded(job.data, tokenizer, "data", target=True, right=False)
     eval_rows = eval_source = None
@@ -552,8 +554,13 @@ def preprocess(job, cache_dir, say=print):
     facts = _facts(rows)
     text = (f"{len(rows):,} questions of {facts['candidates']['least']} to {facts['candidates']['most']} candidates, "
             f"{facts['tokens_read']['least']:,} to {facts['tokens_read']['most']:,} tokens read per question")
-    report = {"kind": "choice questions", "rows": len(rows), "eval_rows": len(eval_rows) if eval_rows else None,
-              "source": source, "eval_source": eval_source, "text": text, **facts}
+    value = {"rows": len(rows), "eval_rows": len(eval_rows) if eval_rows else None, **facts}
+    reason = ("every row has a prompt, 2 or more candidates and a target that sums to 1; the rows are kept in the "
+              "file's order, which is the order they train in")
+    report = {"decision": {"name": "data_checks", "label": "data checks", "value": value, "text": text,
+                           "reason": reason},
+              "kind": "choice questions", "rows": len(rows), "eval_rows": value["eval_rows"],
+              "source": source, "eval_source": eval_source, **facts}
     building = cache_dir / f".building-{os.getpid()}"
     shutil.rmtree(building, ignore_errors=True)
     building.mkdir()

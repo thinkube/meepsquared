@@ -317,6 +317,9 @@ def test_preprocessing_is_kept_and_read_by_the_plan(tokenizer, tmp_path):
     job = make_job(tokenizer, tmp_path)
     outcome = job.preprocess(tmp_path / "cache")
     assert not outcome.found and outcome.report["rows"] == 8
+    # The report has the decision every task's preprocessing reports: Forge shows its text and reason
+    assert outcome.report["decision"]["name"] == "data_checks"
+    assert outcome.report["decision"]["text"].startswith("8 questions") and outcome.report["decision"]["reason"]
     assert make_job(tokenizer, tmp_path).preprocess(tmp_path / "cache").found
     planned = make_job(tokenizer, tmp_path, preprocessed=outcome.folder).plan()
     assert planned["data"].value == "train.jsonl"
