@@ -34,12 +34,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-TASKS = ("sft", "grpo", "tagging")
+TASKS = ("sft", "grpo", "tagging", "choice")
 METHODS = ("lora", "qlora", "fp8", "bottleneck")
 METHOD_NAMES = {"lora": "LoRA", "qlora": "QLoRA", "fp8": "LoRA on FP8 weights", "bottleneck": "bottleneck adapters"}
 # The methods of a tagging job (see meepsquared._tagging_job)
 TAGGING_METHODS = ("lora", "bottleneck")
-SCHEDULES = ("constant", "cosine", "linear")
+SCHEDULES = ("constant", "cosine", "linear", "ramped_linear")
+# The methods of a choice job (see meepsquared._choice_job)
+CHOICE_METHODS = ("lora", "qlora")
+# The Recipe fields of a choice job alone
+CHOICE_RECIPE = ("choice_head", "head_learning_rate", "candidates_per_pass", "head_only")
+# The Recipe fields a choice job refuses
+NOT_CHOICE_RECIPE = ("tokens_per_update", "optimizer", "max_length", "experts")
 # The Recipe fields of a tagging job alone
 TAGGING_RECIPE = ("labels", "words", "bottleneck", "head_dropout", "keep", "average_last", "decode")
 # The Recipe fields a tagging job refuses
@@ -269,6 +275,13 @@ class Recipe:
     epochs'); decode, the parser's heads as a tree with one root, "mst", or
     each word's best head, "argmax". schedule also takes "linear", a tagger's
     default (decay to 0 after the warm-up).
+    Choice only (see meepsquared._choice): choice_head, the head that scores
+    the candidates, "set" (NanoJev's, with an attention over the candidates)
+    or "scalar"; head_learning_rate, the head's rate (1e-3);
+    candidates_per_pass, the candidates read together after the shared text
+    (4); head_only, the first questions of the data that train the head alone,
+    the adapter frozen (500). schedule also takes "ramped_linear", a choice
+    job's only schedule (a linear warm-up times a linear decay to 0).
     """
 
     rank: Optional[int] = None
@@ -301,9 +314,21 @@ class Recipe:
     keep: Optional[str] = None
     average_last: Optional[int] = None
     decode: Optional[str] = None
+    choice_head: Optional[str] = None
+    head_learning_rate: Optional[float] = None
+    candidates_per_pass: Optional[int] = None
+    head_only: Optional[int] = None
 
     def __post_init__(self):
-        from meepsquared import _tagging, _tagging_job
+        from meepsquared import _choice, _tagging, _tagging_job
+
+        if self.choice_head is not None and self.choice_head not in _choice.HEADS:
+            raise ValueError(f"choice_head must be one of {_choice.HEADS}, not {self.choice_head!r}")
+        _check_positive("head_learning_rate", self.head_learning_rate, (int, float))
+        _check_positive("candidates_per_pass", self.candidates_per_pass)
+        if self.head_only is not None and (isinstance(self.head_only, bool) or not isinstance(self.head_only, int)
+                                           or self.head_only < 0):
+            raise ValueError(f"head_only must be a whole number of questions, not {self.head_only!r}")
 
         _check_positive("bottleneck", self.bottleneck)
         _check_positive("average_last", self.average_last)
@@ -546,8 +571,15 @@ class Result:
 
     def save(self, path, merged: bool = False) -> None:
         """The adapter alone, or with merged=True the base model with the adapter merged into 16-bit weights."""
-        from meepsquared import _save, _tagging
+        from meepsquared import _choice, _save, _tagging
 
+        choice = getattr(self._model, "_meepsquared", {}).get("choice")
+        if choice is not None:
+            if merged:
+                raise ValueError("a chooser is saved as its adapter and head on the base model; merged=True is for a "
+                                 "language model alone")
+            _choice.save(self._model, path, choice, tokenizer=self._tokenizer)
+            return
         tagger = getattr(self._model, "_meepsquared", {}).get("tagger")
         if tagger is not None:
             if merged:
@@ -696,11 +728,15 @@ class TrainingJob:
         of each group, a function (hypotheses, references) -> {metric: number}
         or its name as 'module:function' or 'file.py:function'. SFT only, on
         one process. See meepsquared._milestones.
-    preprocessed: SFT only: the folder of the data preprocessed by
+    preprocessed: SFT and choice: the folder of the data preprocessed by
         job.preprocess(cache_dir) (meepsquared._preprocess), read memory-mapped
         after the check that it was made from this job's inputs. Without it,
         the plan preprocesses the data first, into <output>/preprocessed; a
         launch of several processes (torchrun) needs it.
+    start_from: choice only, a .pt file of a training's state made outside
+        meepsquared, to go on from (see meepsquared._choice.read_start); a
+        resumed session goes on from its checkpoint, and start_from only says
+        where the training began.
     recipe, overrides: see Recipe and Overrides.
     """
 
@@ -724,6 +760,7 @@ class TrainingJob:
     milestone_scorer: Any = None
     tokenizer: Any = None
     preprocessed: Any = None
+    start_from: Any = None
     recipe: Recipe = field(default_factory=Recipe)
     overrides: Overrides = field(default_factory=Overrides)
     _prepared: Optional[_Prepared] = field(default=None, init=False, repr=False, compare=False)
@@ -741,6 +778,16 @@ class TrainingJob:
             raise ValueError(f"task must be one of {TASKS}, not {self.task!r}")
         if self.method not in METHODS:
             raise ValueError(f"method must be one of {METHODS}, not {self.method!r}")
+        if self.task != "choice":
+            for name in CHOICE_RECIPE:
+                if getattr(self.recipe, name) is not None:
+                    raise ValueError(f"recipe.{name} is a choice setting")
+            if self.recipe.schedule == "ramped_linear":
+                raise ValueError("schedule 'ramped_linear' is a choice job's")
+            if self.start_from is not None:
+                raise ValueError("start_from is a choice setting")
+        if self.task == "choice":
+            self._check_choice()
         if self.task == "tagging":
             self._check_tagging()
         else:
@@ -751,6 +798,8 @@ class TrainingJob:
                     raise ValueError(f"recipe.{name} is a tagging setting")
             if self.recipe.schedule == "linear":
                 raise ValueError("schedule 'linear' is a tagger's; a language model's is 'constant' or 'cosine'")
+            if self.task == "choice" and self.recipe.schedule not in (None, "ramped_linear"):
+                raise ValueError(f"schedule {self.recipe.schedule!r}: a choice job's schedule is 'ramped_linear'")
         if self.steps is not None and self.epochs is not None:
             raise ValueError("give steps or epochs, not both")
         _check_positive("steps", self.steps)
@@ -773,8 +822,8 @@ class TrainingJob:
         if self.task == "grpo" and (self.eval_data is not None or self.eval_share is not None):
             raise ValueError("eval_data and eval_share are SFT settings and tagging settings: GRPO's reward is its "
                              "measure")
-        if self.task != "sft" and self.preprocessed is not None:
-            raise ValueError("preprocessed is an SFT setting: GRPO's prompts are not tokenized ahead")
+        if self.task not in ("sft", "choice") and self.preprocessed is not None:
+            raise ValueError("preprocessed is an SFT and choice setting: GRPO's prompts are not tokenized ahead")
         if self.task == "grpo" and self.timed_steps:
             raise ValueError("timed_steps: the plan times SFT's steps; GRPO's steps generate their completions")
         if self.task == "grpo" and not self.rewards:
@@ -805,10 +854,12 @@ class TrainingJob:
                              f"most 1, not {self.milestones!r}")
         if self.milestone_eval is not None and self.milestones is None:
             raise ValueError("milestone_eval: no milestones; give milestones, the share of the steps between them")
-        if (self.milestone_eval is None) != (self.milestone_scorer is None):
+        if self.task == "choice" and self.milestone_scorer is not None:
+            raise ValueError("milestone_scorer: a choice job counts the right candidates of milestone_eval's rows")
+        if self.task != "choice" and (self.milestone_eval is None) != (self.milestone_scorer is None):
             raise ValueError("milestone_eval and milestone_scorer go together: the rows to answer and what scores them")
-        if self.milestones is not None and self.task != "sft":
-            raise ValueError("milestones are an SFT setting")
+        if self.milestones is not None and self.task not in ("sft", "choice"):
+            raise ValueError("milestones are an SFT and choice setting")
         if self.overrides.milestone_engine is not None:
             if self.milestone_eval is None:
                 raise ValueError("overrides.milestone_engine answers the milestones' evaluation; give milestones and "
@@ -820,6 +871,30 @@ class TrainingJob:
                 isinstance(self.report_to, str)
                 or (isinstance(self.report_to, (list, tuple)) and all(isinstance(r, str) for r in self.report_to))):
             raise ValueError(f"report_to must be a name such as 'mlflow', or a list of names, not {self.report_to!r}")
+
+    def _check_choice(self) -> None:
+        """What a choice job takes (see meepsquared._choice_job), and what it refuses."""
+        if self.method not in CHOICE_METHODS:
+            raise ValueError(f"a choice job trains {' or '.join(repr(m) for m in CHOICE_METHODS)}, not {self.method!r}")
+        if self.data is None:
+            raise ValueError("data: required, a .jsonl or .parquet file of questions, or a list of them")
+        if self.split != SPLIT:
+            raise ValueError("split is the split of a Hugging Face dataset id, which a choice job does not read")
+        if self.eval_share is not None:
+            raise ValueError("eval_share: a choice job trains its rows in the order given; give eval_data")
+        for name in ("liger", "padding_free", "fused_lora", "compile_layers", "checkpointed_layers",
+                     "selective_layers", "micro_batch", "vllm", "milestone_engine"):
+            if getattr(self.overrides, name) is not None:
+                raise ValueError(f"overrides.{name} is not a choice setting")
+        for name in NOT_CHOICE_RECIPE:
+            if getattr(self.recipe, name) is not None:
+                raise ValueError(f"recipe.{name} is not a choice setting")
+        if self.start_from is not None and not isinstance(self.start_from, (str, os.PathLike)):
+            raise ValueError(f"start_from must be the path of a .pt file, not {type(self.start_from).__name__}")
+        if isinstance(self.model, str) and self.tokenizer is not None:
+            raise ValueError("tokenizer is for a loaded model; with a model id or path meepsquared loads its tokenizer")
+        if not isinstance(self.model, str) and self.tokenizer is None:
+            raise ValueError("tokenizer: required when model is a loaded model")
 
     def _check_tagging(self) -> None:
         """What a tagging job takes (see meepsquared._tagging_job), and what it refuses."""
@@ -892,6 +967,7 @@ class TrainingJob:
                "timed_steps": self.timed_steps, "milestones": self.milestones,
                "preprocessed": str(self.preprocessed) if self.preprocessed is not None else None,
                "milestone_eval": str(self.milestone_eval) if self.milestone_eval is not None else None,
+               "start_from": str(self.start_from) if self.start_from is not None else None,
                "milestone_scorer": (reward_name(self.milestone_scorer, "milestone_scorer")
                                     if self.milestone_scorer is not None else None),
                "recipe": self.recipe.to_dict() or None,
@@ -988,7 +1064,14 @@ class TrainingJob:
             status.update(state="training", plan=prepared.plan.to_dict(), step=step,
                           total_steps=prepared.plan["length"].value)
         milestones = None
-        if prepared.milestones is not None:
+        if prepared.milestones is not None and self.task == "choice":
+            from meepsquared import _choice_job
+
+            milestones = _choice_job.ChoiceMilestones(trainer, output, prepared.milestones, prepared.milestone_rows,
+                                                      prepared.choice["config"], prepared.choice["earlier"],
+                                                      status=status, report=report)
+            trainer.add_callback(milestones)
+        elif prepared.milestones is not None:
             # After Report: the time of a milestone is taken out of the steps'
             milestones = _milestones.Milestones(trainer, output, prepared.milestones, prepared.milestone_rows,
                                                 prepared.milestone_scorer, status=status, report=report,
@@ -1345,6 +1428,11 @@ class TrainingJob:
             from meepsquared import _tagging_job
 
             self._prepared = _tagging_job.prepare(self)
+            return self._prepared
+        if self.task == "choice":
+            from meepsquared import _choice_job
+
+            self._prepared = _choice_job.prepare(self)
             return self._prepared
         import torch
 
@@ -2056,7 +2144,7 @@ ORDER = ["loading", "allocator_cap", "weights", "attention", "padding_free", "li
          "max_grad_norm", "weight_decay", "length", "duration", "memory", "evaluation", "milestones", "milestone_engine",
          "data_checks",
          "source_weights", "max_length", "answers_only", "labels", "words", "bottleneck", "head_dropout", "keep",
-         "decode",
+         "decode", "choice_head", "candidates_per_pass", "head_learning_rate", "head_only", "start_from",
          "generations",
          "max_completion_length", "temperature", "top_p", "top_k", "chat_template_kwargs", "data", "report_to",
          "output"]

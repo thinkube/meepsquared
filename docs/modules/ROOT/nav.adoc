@@ -6,6 +6,7 @@
 ** xref:mixture-of-experts.adoc[Mixture of experts]
 ** xref:grpo.adoc[GRPO]
 ** xref:tagging.adoc[Tagging and parsing]
+** xref:choice.adoc[Choosing among candidates]
 ** xref:several-gpus.adoc[Several GPUs]
 ** xref:unified-memory.adoc[GPUs that share the system's memory]
 ** xref:saving.adoc[Saving]

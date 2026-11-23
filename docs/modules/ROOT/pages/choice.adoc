@@ -1,0 +1,110 @@
+= Choosing among candidates
+:page-type: how-to
+
+_Training a language model to score candidates written after one shared text, against a target distribution._
+
+.TL;DR
+`TrainingJob(task="choice")` trains LoRA on a causal language model and a small head that scores each candidate of a question. The shared text is read once; the candidates are read after it. The loss is the cross-entropy of the softmax of the scores against the target of each question. Milestones count how often the top candidate is a right one.
+
+== Train
+
+[source,python]
+----
+import meepsquared as m2
+
+job = m2.TrainingJob(model="google/gemma-4-E4B-it", task="choice", method="qlora",
+                     data="questions.jsonl", milestones=0.1, milestone_eval="key.jsonl",
+                     report_to="mlflow")
+print(job.plan())
+result = job.train()
+result.save("chooser")
+----
+
+The plan states every decision and its source, as for any training job (see xref:training-job.adoc[Training jobs]). It times training steps on the question the model reads the most tokens of, and on the median one. These steps also measure the peak memory, from which the plan gives the memory a job should ask for (`Plan.memory_request_bytes`).
+
+== The data
+
+`data`, `eval_data` and `milestone_eval` are .jsonl or .parquet files, or lists of them. Each row is one question:
+
+* `prompt`: the shared text, a string (one user message), or a list of chat messages whose last one is a user message.
+* `candidates`: a list of at least 2 strings. Candidate c is appended to the content of the last user message.
+* `target`: one number per candidate, each at least 0, summing to 1. Required in `data` and `eval_data`.
+* `right`: one boolean per candidate, which candidates are right. Required in `milestone_eval`.
+* `group`: optional, a text. A milestone's score is counted per group.
+
+The rows are trained in the order of the file. They are not shuffled: write the file in the order to train.
+
+How a row is read: the chat template is rendered with the last user message's content followed by a marker, and with the generation prompt. The text before the marker is read once. Each candidate, followed by the text after the marker, is read after it. The score of a candidate comes from the final hidden state of its last token.
+
+`job.preprocess(folder)` encodes the rows once, into a folder named by a hash of the data files, the tokenizer and the library versions. Give that folder as `preprocessed`. Without it, the plan preprocesses the rows into `<output>/preprocessed`.
+
+== The model and the head
+
+The model is loaded as for SFT, with `method="lora"` or `"qlora"`, without Liger, and with the attention `"sdpa"` unless `Overrides(attention=...)` says otherwise. For a model with vision and audio towers (Gemma 4), the text model is used. LoRA goes on every linear layer named `q_proj`, `k_proj`, `v_proj` or `o_proj` outside the vision, audio and image modules (`Recipe(targets=...)` changes the names). Its defaults are rank 16, alpha 32 and dropout 0.05.
+
+`Recipe(choice_head=...)` chooses the head:
+
+* `"set"` (the default, NanoJev's): a LayerNorm, a linear score, and an attention over the candidates of the question whose output layer starts at zero.
+* `"scalar"`: the LayerNorm and the linear score of each candidate alone.
+
+The head runs in float32. The language model runs under bf16 autocast on a GPU.
+
+== The training
+
+[cols="1,1,3"]
+|===
+|Setting |Default |Meaning
+
+|`Recipe(effective_batch=...)` |4 |Questions per optimizer step. One question per forward pass.
+|`Recipe(learning_rate=...)` |1e-4 |The adapter's learning rate.
+|`Recipe(head_learning_rate=...)` |1e-3 |The head's learning rate.
+|`Recipe(schedule="ramped_linear")` |the only one |At optimizer step s (from 0): `min(1, (s + 1) / warmup_steps) * (1 - s / total_steps)`.
+|`Recipe(warmup_steps=...)` |400 |The steps of the warm-up.
+|`Recipe(head_only=...)` |500 |The first questions of the data train the head alone: the adapter is frozen and the language model reads without gradients.
+|`Recipe(candidates_per_pass=...)` |4 |Candidates read together after the shared text.
+|`Recipe(max_grad_norm=...)` |1.0 |Gradient clipping over the adapter and the head.
+|`Recipe(weight_decay=...)` |0 |AdamW's weight decay.
+|===
+
+The optimizer is AdamW from PyTorch, with two parameter groups: the adapter's parameters, then the head's. The loss of a step is the sum of its questions' losses, each divided by `effective_batch`. When training, the shared reading and each group of candidates are recomputed in the backward pass (`torch.utils.checkpoint`), so their activations are not kept.
+
+`steps` or `epochs` say how long: `steps` x `effective_batch` questions, or the rows `epochs` times (one by default).
+
+The trainer logs `loss`, `learning_rate` (the adapter's) and `grad_norm` at every step, and `eval_loss` with `eval_data` (every `eval_every` steps). With `report_to="mlflow"` MLflow records them.
+
+== Milestones
+
+`milestones` is the share of the planned steps between milestones; there is always one at the last step. At each milestone, `<output>/milestones/step-<N>` keeps the adapter, `head.safetensors` and `choice.json`. With `milestone_eval`, each row's top candidate is chosen (the model in evaluation mode, no gradients). The answers go to `answers.jsonl`, and `milestone.json` records the count of right answers per group:
+
+[source,json]
+----
+{"step": 250, "planned_steps": 2500, "folder": "out/milestones/step-250",
+ "scores": {"all": {"right": 412, "of": 600}}, "rows": 600, "seconds": 61.2,
+ "seconds_of": {"saving": 0.4, "answering": 60.8}}
+----
+
+The trainer logs `milestone/<group>/right` and `milestone/<group>/of`. No `milestone_scorer` is given.
+
+== Saving, checkpoints and resuming
+
+`result.save(folder)` writes the adapter (PEFT's `adapter_config.json` and `adapter_model.safetensors`), `head.safetensors`, `choice.json` (the head kind, the model, the method and the candidates per pass) and the tokenizer. `merged=True` is refused.
+
+A checkpoint holds the same adapter, head and `choice.json` files, plus Transformers' `optimizer.pt`, `scheduler.pt`, `rng_state.pth` and `trainer_state.json`. `train(resume=True)` (or `meepsquared train --resume`) goes on at the next question and step.
+
+== Starting from a state made elsewhere
+
+`start_from` is a .pt file that `torch.load` reads as:
+
+[source,python]
+----
+{"examples": N,                    # questions done; a multiple of effective_batch
+ "trainable": {name: tensor},      # every trainable parameter, and only those
+ "optimizer": {name: {"step": tensor, "exp_avg": tensor, "exp_avg_sq": tensor}},
+ "milestones": [...]}              # optional: earlier milestone records, listed first
+----
+
+The adapter's names are PEFT's, for example `base_model.model.model.language_model.layers.0.self_attn.q_proj.lora_A.default.weight`. The head's are `head.<module path>`, for example `head.set_attention.in_proj_weight`. A name of the model missing from the file, or a name of the file that is not trainable here, is an error that names them. The optimizer may leave out parameters that have no state yet.
+
+The training starts at question N and at optimizer step N / `effective_batch` of the schedule. The questions before N are not read. A resumed session of such a training goes on from its checkpoint; `start_from` then only says where the training began, and the plan says so.
+
+A state saved by AdamW's own `state_dict()` is indexed by number, in the order of the parameter groups: the adapter's parameters in `named_parameters()` order, then the head's. Give each number its name to write the file.

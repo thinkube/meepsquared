@@ -46,7 +46,8 @@ PLAN_FILE = "meepsquared-plan.json"
 SAME_ON_RESUME = ("tokens_per_update", "effective_batch", "micro_batch", "accumulation", "order", "length",
                   "max_length", "padding_free", "answers_only", "evaluation", "data_checks", "source_weights",
                   "rank", "alpha", "dropout", "targets", "experts", "optimizer", "learning_rate", "schedule",
-                  "warmup_steps", "max_grad_norm", "weight_decay", "data")
+                  "warmup_steps", "max_grad_norm", "weight_decay", "data", "choice_head", "candidates_per_pass",
+                  "head_learning_rate", "head_only", "start_from")
 # The warm-up steps time_steps runs before it times any
 TIMING_WARMUP = 1
 # The memory a job asks for, over the training's measured peak

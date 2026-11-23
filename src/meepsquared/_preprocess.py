@@ -361,6 +361,10 @@ def preprocess(job, cache_dir, cores: Optional[int] = None, say=print) -> Outcom
                          f"{os.environ['WORLD_SIZE']}): preprocess the data first, in one process "
                          "(job.preprocess(cache_dir), or meepsquared preprocess job.yaml --cache <dir>), and give "
                          "the folder to the job as preprocessed")
+    if job.task == "choice":
+        from meepsquared import _choice
+
+        return _choice.preprocess(job, cache_dir, say)
     return _preprocess_here(job, cache_dir, cores, say)
 
 

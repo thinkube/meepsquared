@@ -1,0 +1,368 @@
+# Copyright Alejandro Martínez Corriá and the Thinkube contributors
+# SPDX-License-Identifier: Apache-2.0
+
+"""TrainingJob(task="choice"): candidates after one shared text, scored against a target distribution."""
+
+import json
+from pathlib import Path
+
+import pytest
+import torch
+from transformers import LlamaConfig, LlamaForCausalLM, TrainerCallback
+
+import meepsquared as m2
+from meepsquared import _choice, _choice_job, cli
+from meepsquared.job import TrainingJob
+from meepsquared.models import MeepLanguageModel
+
+from conftest import CHATML
+
+PROMPTS = ["the hare ", "the sloth ", "and the hare ", "the sloth sleeps and the hare "]
+CANDIDATES = [["runs", "sleeps"], ["runs", "sleeps", "fast"], ["sleeps", "runs fast", "the sloth", "fast"],
+              ["runs", "fast"]]
+HEAD_NAMES = ["norm.weight", "norm.bias", "scalar.weight", "scalar.bias", "set_project.weight", "set_project.bias",
+              "set_attention.in_proj_weight", "set_attention.in_proj_bias", "set_attention.out_proj.weight",
+              "set_attention.out_proj.bias", "set_output.weight", "set_output.bias"]
+
+
+@pytest.fixture
+def tokenizer(chat_tokenizer):
+    return chat_tokenizer(CHATML)
+
+
+def make_model(tokenizer):
+    """A random two-layer Llama on the CPU over the tokenizer's vocabulary, the same weights at each call, marked as
+    meepsquared's from_pretrained marks it."""
+    torch.manual_seed(0)
+    config = LlamaConfig(vocab_size=len(tokenizer), hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+                         num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=128)
+    model = LlamaForCausalLM(config)
+    model._meepsquared = {"padding_free": True, "liger": False}
+    return model
+
+
+def rows(count=8, chat=False):
+    found = []
+    for i in range(count):
+        candidates = CANDIDATES[i % len(CANDIDATES)]
+        k = len(candidates)
+        target = [0.0] * k
+        target[i % k] = 0.75
+        target[(i + 1) % k] += 0.25
+        prompt = PROMPTS[i % len(PROMPTS)]
+        if chat:
+            prompt = [{"role": "user", "content": "the sloth"}, {"role": "assistant", "content": "sleeps"},
+                      {"role": "user", "content": prompt}]
+        found.append({"prompt": prompt, "candidates": candidates, "target": target,
+                      "right": [j == i % k for j in range(k)], "group": "even" if i % 2 == 0 else "odd"})
+    return found
+
+
+def write(path: Path, found: list) -> str:
+    path.write_text("\n".join(json.dumps(r) for r in found) + "\n")
+    return str(path)
+
+
+def chooser_of(tokenizer, kind="set", per_pass=2):
+    model = make_model(tokenizer)
+    peft = MeepLanguageModel.get_peft_model(model, r=4, lora_alpha=8, lora_dropout=0.0,
+                                            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                                            use_gradient_checkpointing=False, fused_lora=False, compile_layers=False)
+    decoder = peft.get_base_model().get_decoder()
+    head = _choice.build_head(decoder.config.hidden_size, kind)
+    return _choice.Chooser(peft, decoder, head, kind, per_pass, tokenizer.pad_token_id)
+
+
+def make_job(tokenizer, tmp_path, output="out", data=None, **fields):
+    recipe = {"effective_batch": 2, "head_only": 0, "warmup_steps": 1, "learning_rate": 1e-2,
+              "head_learning_rate": 1e-2, "rank": 4, "alpha": 8, "dropout": 0.0, **fields.pop("recipe", {})}
+    return TrainingJob(model=make_model(tokenizer), tokenizer=tokenizer, task="choice",
+                       data=data if data is not None else write(tmp_path / "train.jsonl", rows()),
+                       output=str(tmp_path / output), timed_steps=fields.pop("timed_steps", 0),
+                       recipe=m2.Recipe(**recipe), **fields)
+
+
+def logged(trainer, key):
+    return {entry["step"]: entry[key] for entry in trainer.state.log_history if key in entry}
+
+
+def test_a_row_is_the_shared_tokens_then_each_candidates_own(tokenizer):
+    for row in rows(4) + rows(4, chat=True):
+        encoded = _choice.encode(tokenizer, row)
+        for c, candidate in enumerate(row["candidates"]):
+            messages = ([{"role": "user", "content": row["prompt"] + candidate}] if isinstance(row["prompt"], str)
+                        else row["prompt"][:-1] + [{"role": "user", "content": row["prompt"][-1]["content"]
+                                                    + candidate}])
+            whole = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+            assert encoded["shared"] + encoded["own"][c] == tokenizer(whole, add_special_tokens=False)["input_ids"]
+
+
+@pytest.mark.parametrize("row, error", [
+    ({"prompt": "the hare", "candidates": ["runs"], "target": [1.0]}, "at least 2"),
+    ({"prompt": "the hare", "candidates": ["runs", "fast"], "target": [0.5, 0.6]}, "sums to"),
+    ({"prompt": "the hare", "candidates": ["runs", "fast"], "target": [1.5, -0.5]}, "at least 0"),
+    ({"prompt": "the hare", "candidates": ["runs", "fast"]}, "'target' is required"),
+    ({"prompt": [{"role": "assistant", "content": "x"}], "candidates": ["a", "b"], "target": [1, 0]}, "user message"),
+    ({"prompt": "the hare", "candidates": ["runs", "fast"], "target": [1, 0], "right": [True]}, "'right' must be"),
+])
+def test_rows_that_are_not_questions_are_refused(row, error):
+    with pytest.raises(ValueError, match=error):
+        _choice.check_row(row, 0, "data", target=True, right=False)
+
+
+def test_a_milestone_row_needs_its_right_candidates():
+    with pytest.raises(ValueError, match="'right' is required"):
+        _choice.check_row({"prompt": "the hare", "candidates": ["a", "b"]}, 0, "milestone_eval", target=False,
+                          right=True)
+
+
+def test_the_shared_reading_is_the_full_reading_of_each_candidate(tokenizer):
+    chooser = chooser_of(tokenizer, per_pass=2).eval()
+    for row in rows(4):
+        encoded = _choice.encode(tokenizer, row)
+        with torch.no_grad():
+            shared = chooser.leaves(encoded["shared"], encoded["own"], grad=False)
+            for c, own in enumerate(encoded["own"]):
+                whole = chooser.decoder(input_ids=torch.tensor([encoded["shared"] + own])).last_hidden_state[0, -1]
+                assert torch.allclose(shared[c], whole, atol=1e-5)
+
+
+def test_the_checkpointed_reading_gives_the_same_states_and_trains_the_adapter(tokenizer):
+    chooser = chooser_of(tokenizer, per_pass=2)
+    encoded = _choice.encode(tokenizer, rows(3)[2])
+    with torch.no_grad():
+        plain = chooser.leaves(encoded["shared"], encoded["own"], grad=False)
+    checkpointed = chooser.leaves(encoded["shared"], encoded["own"], grad=True)
+    assert torch.allclose(plain, checkpointed, atol=1e-6)
+    chooser.question_loss(encoded["shared"], encoded["own"], encoded["target"], grad=True).backward()
+    named = dict(chooser.peft.named_parameters())
+    assert any(named[n].grad is not None and named[n].grad.abs().sum() > 0
+               for n in chooser.adapter_names if "lora_B" in n)
+    assert all(p.grad is not None for p in chooser.head.parameters() if p.requires_grad)
+
+
+def test_the_head_is_named_as_a_saved_state_names_it_and_starts_as_its_scalar(tokenizer):
+    head = _choice.build_head(32, "set")
+    assert [n for n, _ in head.named_parameters()] == HEAD_NAMES
+    leaves = torch.randn(3, 32)
+    expected = head["scalar"](head["norm"](leaves)).squeeze(-1)
+    assert torch.allclose(_choice.scores(head, leaves), expected)
+    assert [n for n, _ in _choice.build_head(32, "scalar").named_parameters()] == HEAD_NAMES[:4]
+    chooser = chooser_of(tokenizer)
+    names = list(chooser.trainable())
+    assert names[-len(HEAD_NAMES):] == ["head." + n for n in HEAD_NAMES]
+    assert all(n.startswith("base_model.model.model.layers.") and ".lora_" in n and n.endswith(".default.weight")
+               for n in names[:-len(HEAD_NAMES)])
+
+
+def test_the_ramp_rises_then_falls_to_zero():
+    assert _choice_job.ramp(0, 400, 1000) == pytest.approx(1 / 400)
+    assert _choice_job.ramp(399, 400, 1000) == pytest.approx(1 - 399 / 1000)
+    assert _choice_job.ramp(999, 400, 1000) == pytest.approx(1 / 1000)
+    assert _choice_job.ramp(3, 0, 10) == pytest.approx(0.7)
+
+
+class Adapter(TrainerCallback):
+    """The sum of the absolute values of the adapter's B matrices at the end of each step."""
+
+    def __init__(self):
+        self.sums = {}
+
+    def on_step_end(self, args, state, control, model=None, **kwargs):
+        chooser = self.model
+        self.sums[state.global_step] = sum(float(p.abs().sum()) for n, p in zip(chooser.adapter_names,
+                                                                                 chooser.adapter()) if "lora_B" in n)
+
+
+def test_a_choice_job_plans_trains_keeps_milestones_and_saves(tokenizer, tmp_path):
+    milestone_eval = write(tmp_path / "milestones.jsonl", rows(4))
+    job = make_job(tokenizer, tmp_path, milestones=0.5, milestone_eval=milestone_eval,
+                   recipe={"head_only": 2})
+    plan = job.plan()
+    assert plan["length"].value == 4
+    assert plan["choice_head"].value == "set" and plan["candidates_per_pass"].value == 4
+    assert plan["schedule"].value == "ramped_linear" and plan["head_only"].value == 2
+    assert plan["milestones"].value["steps"] == [2, 4]
+    trainer = job.trainer()
+    watch = Adapter()
+    watch.model = trainer.model
+    trainer.add_callback(watch)
+    result = job.train()
+    assert result.steps == 4 and result.final_loss is not None
+    # The first two questions, the first step, train the head alone
+    assert watch.sums[1] == 0 and watch.sums[2] > 0
+    rates = logged(trainer, "learning_rate")
+    for step in range(1, 5):
+        assert rates[step] == pytest.approx(1e-2 * _choice_job.ramp(step - 1, 1, 4))
+    assert [m["step"] for m in result.milestones] == [2, 4]
+    scores = result.milestones[-1]["scores"]
+    assert set(scores) == {"even", "odd"} and sum(s["of"] for s in scores.values()) == 4
+    folder = Path(result.milestones[-1]["folder"])
+    for name in ("adapter_model.safetensors", "adapter_config.json", _choice.HEAD_FILE, _choice.CONFIG_FILE,
+                 _choice.ANSWERS, "milestone.json"):
+        assert (folder / name).is_file(), name
+    assert "milestone/even/right" in json.dumps(trainer.state.log_history)
+    result.save(tmp_path / "saved")
+    assert json.loads((tmp_path / "saved" / _choice.CONFIG_FILE).read_text())["head"] == "set"
+    with pytest.raises(ValueError, match="merged=True"):
+        result.save(tmp_path / "merged", merged=True)
+
+
+def state_at(trainer, step: int, examples: int, path: Path):
+    """A callback that writes the training's state at `step` as a start_from file."""
+
+    class Dump(TrainerCallback):
+        def on_step_end(self, args, state, control, **kwargs):
+            if state.global_step != step:
+                return
+            chooser = trainer.model
+            optimizer = getattr(trainer.optimizer, "optimizer", trainer.optimizer)
+            trainable = chooser.trainable()
+            saved = {"examples": examples,
+                     "trainable": {n: p.detach().clone() for n, p in trainable.items()},
+                     "optimizer": {n: {k: optimizer.state[p][k].clone() for k in _choice.ADAM_KEYS}
+                                   for n, p in trainable.items() if p in optimizer.state},
+                     "milestones": [{"step": 1, "scores": {"all": {"right": 1, "of": 2}}}]}
+            torch.save(saved, path)
+
+    return Dump()
+
+
+class StopAt(TrainerCallback):
+    def __init__(self, step, stop_file):
+        self.step, self.stop_file = step, stop_file
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step == self.step:
+            Path(self.stop_file).touch()
+
+
+def test_start_from_goes_on_at_its_question_and_step(tokenizer, tmp_path):
+    data = write(tmp_path / "train.jsonl", rows())
+    whole = make_job(tokenizer, tmp_path, "whole", data=data, steps=6)
+    trainer = whole.trainer()
+    start = tmp_path / "start.pt"
+    trainer.add_callback(state_at(trainer, 2, 4, start))
+    whole.train()
+
+    job = make_job(tokenizer, tmp_path, "started", data=data, steps=6, start_from=str(start))
+    plan = job.plan()
+    assert plan["start_from"].value == {"file": str(start), "examples": 4, "step": 2}
+    started = job.trainer()
+    result = job.train()
+    assert result.steps == 6
+    losses, rates = logged(trainer, "loss"), logged(trainer, "learning_rate")
+    started_losses, started_rates = logged(started, "loss"), logged(started, "learning_rate")
+    assert sorted(started_losses) == [3, 4, 5, 6]
+    for step in range(3, 7):
+        assert started_losses[step] == pytest.approx(losses[step], rel=1e-5, abs=1e-6)
+        assert started_rates[step] == pytest.approx(rates[step], rel=1e-6)
+
+
+def test_a_resumed_session_of_a_started_training_goes_on_from_its_checkpoint(tokenizer, tmp_path):
+    data = write(tmp_path / "train.jsonl", rows())
+    whole = make_job(tokenizer, tmp_path, "whole", data=data, steps=6)
+    trainer = whole.trainer()
+    start = tmp_path / "start.pt"
+    trainer.add_callback(state_at(trainer, 2, 4, start))
+    whole.train()
+
+    uninterrupted = make_job(tokenizer, tmp_path, "uninterrupted", data=data, steps=6, start_from=str(start))
+    reference = uninterrupted.trainer()
+    uninterrupted.train()
+
+    stop = tmp_path / "STOP"
+    first = make_job(tokenizer, tmp_path, "out", data=data, steps=6, start_from=str(start))
+    first.trainer().add_callback(StopAt(4, stop))
+    paused = first.train(stop_file=stop)
+    assert paused.paused and paused.steps == 4
+    stop.unlink()
+
+    second = make_job(tokenizer, tmp_path, "out", data=data, steps=6, start_from=str(start))
+    resumed = second.train(resume=True, stop_file=stop)
+    assert not resumed.paused and resumed.steps == 6
+    assert "resumed session" in second.plan()["start_from"].text
+    assert second.plan()["start_from"].value == first.plan()["start_from"].value
+    losses, rates = logged(reference, "loss"), logged(reference, "learning_rate")
+    resumed_trainer = second.trainer()
+    resumed_losses, resumed_rates = logged(resumed_trainer, "loss"), logged(resumed_trainer, "learning_rate")
+    for step in (5, 6):
+        assert resumed_losses[step] == pytest.approx(losses[step], rel=1e-5, abs=1e-6)
+        assert resumed_rates[step] == pytest.approx(rates[step], rel=1e-6)
+    assert resumed_rates[5] == pytest.approx(1e-2 * _choice_job.ramp(4, 1, 6))
+
+
+def test_a_start_from_state_of_other_parameters_is_refused(tokenizer, tmp_path):
+    start = tmp_path / "start.pt"
+    chooser = chooser_of(tokenizer)
+    trainable = chooser.trainable()
+    name = next(iter(trainable))
+    torch.save({"examples": 2, "trainable": {n: p.detach() for n, p in trainable.items() if n != name},
+                "optimizer": {}}, start)
+    with pytest.raises(ValueError, match="not in the file"):
+        make_job(tokenizer, tmp_path, start_from=str(start)).plan()
+    torch.save({"examples": 3, "trainable": {n: p.detach() for n, p in trainable.items()}, "optimizer": {}}, start)
+    with pytest.raises(ValueError, match="whole optimizer steps"):
+        make_job(tokenizer, tmp_path, start_from=str(start)).plan()
+
+
+def test_the_plan_gives_the_memory_a_job_should_ask_for(tokenizer, tmp_path):
+    plan = make_job(tokenizer, tmp_path, timed_steps=1).plan()
+    assert plan.memory_request_bytes is not None and plan.memory_request_bytes > 0
+    assert plan["memory"].value["memory_request_bytes"] == plan.memory_request_bytes
+    assert plan.seconds_per_step is not None
+
+
+def test_preprocessing_is_kept_and_read_by_the_plan(tokenizer, tmp_path):
+    job = make_job(tokenizer, tmp_path)
+    outcome = job.preprocess(tmp_path / "cache")
+    assert not outcome.found and outcome.report["rows"] == 8
+    assert make_job(tokenizer, tmp_path).preprocess(tmp_path / "cache").found
+    planned = make_job(tokenizer, tmp_path, preprocessed=outcome.folder).plan()
+    assert planned["data"].value == "train.jsonl"
+    other = write(tmp_path / "other.jsonl", rows(6))
+    with pytest.raises(ValueError, match="other inputs"):
+        make_job(tokenizer, tmp_path, data=other, preprocessed=outcome.folder).plan()
+
+
+def test_the_command_trains_a_choice_job_with_its_status(tokenizer, tmp_path, monkeypatch):
+    output, status = tmp_path / "out", tmp_path / "status.json"
+    job = make_job(tokenizer, tmp_path, eval_data=write(tmp_path / "eval.jsonl", rows(3)), eval_every=2,
+                   milestones=0.5, milestone_eval=write(tmp_path / "milestones.jsonl", rows(4)), report_to=[])
+    monkeypatch.setattr(TrainingJob, "from_yaml", classmethod(lambda cls, path: job))
+    assert cli.main(["train", "job.yaml", "--status-file", str(status)]) == 0
+    written = json.loads(status.read_text())
+    assert written["state"] == "completed" and written["step"] == written["total_steps"] == 4
+    assert written["eval_loss"] is not None and [m["step"] for m in written["milestones"]] == [2, 4]
+    assert (output / _choice.HEAD_FILE).is_file() and (output / "adapter_model.safetensors").is_file()
+
+
+def test_a_choice_job_refuses_other_tasks_settings_and_others_refuse_its():
+    with pytest.raises(ValueError, match="a choice job trains"):
+        TrainingJob(model="x", task="choice", method="fp8", data="d.jsonl")
+    with pytest.raises(ValueError, match="milestone_scorer"):
+        TrainingJob(model="x", task="choice", data="d.jsonl", milestones=0.5, milestone_eval="m.jsonl",
+                    milestone_scorer="m:f")
+    with pytest.raises(ValueError, match="'ramped_linear'"):
+        TrainingJob(model="x", task="choice", data="d.jsonl", recipe=m2.Recipe(schedule="cosine"))
+    with pytest.raises(ValueError, match="not a choice setting"):
+        TrainingJob(model="x", task="choice", data="d.jsonl", recipe=m2.Recipe(tokens_per_update=4096))
+    with pytest.raises(ValueError, match="eval_share"):
+        TrainingJob(model="x", task="choice", data="d.jsonl", eval_share=0.1)
+    with pytest.raises(ValueError, match="choice setting"):
+        TrainingJob(model="x", data="d.jsonl", recipe=m2.Recipe(head_only=5))
+    with pytest.raises(ValueError, match="choice setting"):
+        TrainingJob(model="x", data="d.jsonl", start_from="s.pt")
+    with pytest.raises(ValueError, match="choice job's"):
+        TrainingJob(model="x", task="tagging", method="lora", data="d.jsonl", recipe=m2.Recipe(schedule="ramped_linear"))
+    with pytest.raises(ValueError, match="choice_head"):
+        m2.Recipe(choice_head="pairs")
+
+
+def test_a_choice_job_is_data_and_back():
+    job = TrainingJob(model="org/model", task="choice", method="qlora", data=["a.jsonl", "b.jsonl"],
+                      start_from="state.pt", milestones=0.25, milestone_eval="key.jsonl",
+                      recipe=m2.Recipe(choice_head="scalar", head_learning_rate=1e-3, candidates_per_pass=8,
+                                       head_only=500, schedule="ramped_linear"))
+    again = TrainingJob.from_dict(job.to_dict())
+    assert again.to_dict() == job.to_dict() and again.start_from == "state.pt"
