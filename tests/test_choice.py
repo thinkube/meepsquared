@@ -421,3 +421,37 @@ def test_a_second_chooser_answers_as_the_trained_one_once_its_adapter_and_head_a
     assert _choice.answer(other, found) != _choice.answer(trained, found)
     _choice.copy_trainable(trained, other)
     assert _choice.answer(other, found) == _choice.answer(trained, found)
+
+
+def test_a_set_head_of_two_layers_starts_as_the_scalar_score_and_mixes_the_candidates_twice():
+    torch.manual_seed(0)
+    one, two = _choice.build_head(32, "set"), _choice.build_head(32, "set", set_layers=2)
+    assert [n for n, _ in one.named_parameters()] == HEAD_NAMES
+    names = [n for n, _ in two.named_parameters()]
+    assert names[:8] == HEAD_NAMES[:8] and "set_attention_2.in_proj_weight" in names
+    assert names[-2:] == ["set_output.weight", "set_output.bias"]
+    leaves = torch.randn(5, 32)
+    plain = two["scalar"](two["norm"](leaves)).squeeze(-1)
+    # The output layer starts at zero: the scores are the scalar score's
+    assert torch.allclose(_choice.scores(two, leaves), plain)
+    with torch.no_grad():
+        two["set_output"].weight.normal_()
+        two["set_attention_2"].out_proj.weight.zero_()
+        two["set_attention_2"].out_proj.bias.zero_()
+    changed = _choice.scores(two, leaves)
+    with torch.no_grad():
+        two["set_attention_2"].out_proj.weight.normal_()
+    assert not torch.allclose(_choice.scores(two, leaves), changed)
+    with pytest.raises(ValueError, match="set_layers are the set head's"):
+        m2.Recipe(choice_head="scalar", set_layers=2)
+    with pytest.raises(ValueError, match="set_layers is a choice setting|recipe.set_layers is a choice setting"):
+        TrainingJob(model="x", data="d.jsonl", recipe=m2.Recipe(set_layers=2))
+
+
+def test_a_saved_head_of_other_layers_is_refused(tokenizer, tmp_path):
+    saved = chooser_of(tokenizer)
+    _choice.save(saved, tmp_path / "head", {"head": "set"})
+    other = chooser_of(tokenizer)
+    other.head = _choice.build_head(32, "set", set_layers=2)
+    with pytest.raises(ValueError, match="the saved head is not this head"):
+        _choice.load(other, tmp_path / "head")

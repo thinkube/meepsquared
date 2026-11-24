@@ -59,6 +59,7 @@ WARMUP_STEPS = 400
 HEAD_ONLY = 500
 CANDIDATES_PER_PASS = 4
 HEAD = "set"
+SET_LAYERS = 1
 WEIGHT_DECAY = 0.0
 MAX_GRAD_NORM = 1.0
 SCHEDULE = "ramped_linear"
@@ -316,7 +317,7 @@ def attention_of(job) -> str:
 
 
 def _answering_chooser(job, method: str, attention: str, rank: int, alpha: int, names: list, kind: str,
-                       per_pass: int, pad_id: int):
+                       set_layers: int, per_pass: int, pad_id: int):
     """A second copy of the base loaded as `method`, with the same adapter's shape and head, frozen, in evaluation
     mode: the milestones' rows are answered on it once the training's adapter and head are copied in."""
     from meepsquared.models import MeepLanguageModel
@@ -331,7 +332,7 @@ def _answering_chooser(job, method: str, attention: str, rank: int, alpha: int, 
                                             target_modules=_language_model_targets(model, names),
                                             use_gradient_checkpointing=False, fused_lora=False, compile_layers=False)
     decoder = peft.get_base_model().get_decoder()
-    head = _choice.build_head(decoder.config.hidden_size, kind).to(next(decoder.parameters()).device)
+    head = _choice.build_head(decoder.config.hidden_size, kind, set_layers).to(next(decoder.parameters()).device)
     answering = _choice.Chooser(peft, decoder, head, kind, per_pass, pad_id)
     for p in answering.parameters():
         p.requires_grad_(False)
@@ -403,12 +404,14 @@ def prepare(job):
     decoder = peft.get_base_model().get_decoder()
     device = next(decoder.parameters()).device
     kind = recipe.choice_head if recipe.choice_head is not None else HEAD
+    set_layers = recipe.set_layers if recipe.set_layers is not None else SET_LAYERS
     per_pass = recipe.candidates_per_pass if recipe.candidates_per_pass is not None else CANDIDATES_PER_PASS
     torch.manual_seed(SEED)
-    head = _choice.build_head(decoder.config.hidden_size, kind).to(device)
+    head = _choice.build_head(decoder.config.hidden_size, kind, set_layers).to(device)
     chooser = _choice.Chooser(peft, decoder, head, kind, per_pass, tokenizer.pad_token_id)
     model_name = job.model if isinstance(job.model, str) else str(model.config._name_or_path)
-    config = {"head": kind, "model": model_name, "method": job.method, "candidates_per_pass": per_pass}
+    config = {"head": kind, "set_layers": set_layers, "model": model_name, "method": job.method,
+              "candidates_per_pass": per_pass}
     chooser._meepsquared = {"choice": config}
     decisions.append(_decide("rank", "LoRA rank", recipe.rank, RANK, str, REFERENCE))
     decisions.append(_decide("alpha", "LoRA alpha", recipe.alpha, ALPHA, str, REFERENCE))
@@ -420,6 +423,11 @@ def prepare(job):
                  "scalar": "a LayerNorm and a scalar score of each candidate alone"}
     decisions.append(_decide("choice_head", "head", recipe.choice_head, HEAD, head_text.get,
                              "the score of a candidate from the last state of its reading"))
+    if kind == "set":
+        decisions.append(_decide("set_layers", "set layers", recipe.set_layers, SET_LAYERS,
+                                 lambda n: f"{n} attention layer{'s' if n != 1 else ''} over the candidates"
+                                           + (", each over the previous one's output" if n > 1 else ""),
+                                 REFERENCE))
     decisions.append(_decide("candidates_per_pass", "per pass", recipe.candidates_per_pass, CANDIDATES_PER_PASS,
                              lambda n: f"{n} candidates read together after the shared text, which is read once",
                              REFERENCE))
@@ -535,7 +543,7 @@ def prepare(job):
     if job.milestone_weights is not None and job.milestone_weights != job.method:
         answering = (job.milestone_weights,
                      _answering_chooser(job, job.milestone_weights, attention_of(job), rank, alpha, names, kind,
-                                        per_pass, tokenizer.pad_token_id))
+                                        set_layers, per_pass, tokenizer.pad_token_id))
         decisions.append(Decision("milestone_weights", "milestone weights", job.milestone_weights,
                                   f"a second copy of the base loaded as {job.milestone_weights} answers the "
                                   "milestones' rows, the adapter and the head copied into it at each milestone",

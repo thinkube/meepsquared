@@ -195,15 +195,27 @@ def tokens_read(row: dict) -> int:
 
 # The head and the model
 
-def build_head(hidden: int, kind: str) -> nn.ModuleDict:
-    """The head of `kind` for states of `hidden` dimensions, its modules named as a saved state names them."""
+def set_attention_name(layer: int) -> str:
+    """The module name of the set head's attention layer `layer` (1-based): the first keeps the name a saved state of
+    one layer has."""
+    return "set_attention" if layer == 1 else f"set_attention_{layer}"
+
+
+def build_head(hidden: int, kind: str, set_layers: int = 1) -> nn.ModuleDict:
+    """The head of `kind` for states of `hidden` dimensions, its modules named as a saved state names them; the set
+    head with `set_layers` attention layers over the candidates."""
     if kind not in HEADS:
         raise ValueError(f"the head is one of {HEADS}, not {kind!r}")
+    if set_layers < 1 or (kind != "set" and set_layers != 1):
+        raise ValueError(f"set_layers is 1 or more, and only the set head has more than 1, not {set_layers}")
     modules = {"norm": nn.LayerNorm(hidden), "scalar": nn.Linear(hidden, 1)}
     if kind == "set":
-        modules.update(set_project=nn.Linear(hidden + 1, SET_WIDTH),
-                       set_attention=nn.MultiheadAttention(SET_WIDTH, SET_HEADS, dropout=0.0, batch_first=True),
-                       set_output=nn.Linear(SET_WIDTH, 1))
+        # In this order, a one-layer head's: the optimizer takes the head's parameters in named_parameters() order
+        modules["set_project"] = nn.Linear(hidden + 1, SET_WIDTH)
+        for layer in range(1, set_layers + 1):
+            modules[set_attention_name(layer)] = nn.MultiheadAttention(SET_WIDTH, SET_HEADS, dropout=0.0,
+                                                                       batch_first=True)
+        modules["set_output"] = nn.Linear(SET_WIDTH, 1)
     head = nn.ModuleDict(modules)
     nn.init.normal_(head["scalar"].weight, std=0.02)
     nn.init.zeros_(head["scalar"].bias)
@@ -215,15 +227,19 @@ def build_head(hidden: int, kind: str) -> nn.ModuleDict:
 
 def scores(head: nn.ModuleDict, leaves: torch.Tensor) -> torch.Tensor:
     """The head on the last states of the candidates of one question: the scalar score, plus with "set" the change
-    the attention over the candidates makes. In float32."""
+    its attention layers over the candidates make, each over the previous one's output. In float32."""
     with torch.autocast(leaves.device.type, enabled=False):
         h = head["norm"](leaves.float())
         z = head["scalar"](h).squeeze(-1)
         if "set_project" in head:
             log_k = torch.full((len(h), 1), math.log(len(h)), device=h.device)
             u = head["set_project"](torch.cat([h, log_k], dim=-1))[None]
-            mixed, _ = head["set_attention"](u, u, u, need_weights=False)
-            z = z + head["set_output"](torch.tanh(u + mixed)).squeeze(-1)[0]
+            layer = 1
+            while set_attention_name(layer) in head:
+                mixed, _ = head[set_attention_name(layer)](u, u, u, need_weights=False)
+                u = torch.tanh(u + mixed)
+                layer += 1
+            z = z + head["set_output"](u).squeeze(-1)[0]
     return z
 
 

@@ -44,7 +44,7 @@ SCHEDULES = ("constant", "cosine", "linear", "ramped_linear")
 # The methods of a choice job (see meepsquared._choice_job)
 CHOICE_METHODS = ("lora", "qlora", "fp8", "nvfp4")
 # The Recipe fields of a choice job alone
-CHOICE_RECIPE = ("choice_head", "head_learning_rate", "candidates_per_pass", "head_only")
+CHOICE_RECIPE = ("choice_head", "head_learning_rate", "candidates_per_pass", "head_only", "set_layers")
 # The Recipe fields a choice job refuses
 NOT_CHOICE_RECIPE = ("tokens_per_update", "optimizer", "max_length", "experts")
 # The Recipe fields of a tagging job alone
@@ -281,7 +281,8 @@ class Recipe:
     or "scalar"; head_learning_rate, the head's rate (1e-3);
     candidates_per_pass, the candidates read together after the shared text
     (4); head_only, the first questions of the data that train the head alone,
-    the adapter frozen (500). schedule also takes "ramped_linear", a choice
+    the adapter frozen (500); set_layers, the set head's attention layers
+    over the candidates, each over the previous one's output (1). schedule also takes "ramped_linear", a choice
     job's only schedule (a linear warm-up times a linear decay to 0).
     """
 
@@ -319,6 +320,7 @@ class Recipe:
     head_learning_rate: Optional[float] = None
     candidates_per_pass: Optional[int] = None
     head_only: Optional[int] = None
+    set_layers: Optional[int] = None
 
     def __post_init__(self):
         from meepsquared import _choice, _tagging, _tagging_job
@@ -327,6 +329,9 @@ class Recipe:
             raise ValueError(f"choice_head must be one of {_choice.HEADS}, not {self.choice_head!r}")
         _check_positive("head_learning_rate", self.head_learning_rate, (int, float))
         _check_positive("candidates_per_pass", self.candidates_per_pass)
+        _check_positive("set_layers", self.set_layers)
+        if self.set_layers is not None and self.choice_head == "scalar":
+            raise ValueError("set_layers are the set head's; the scalar head has none")
         if self.head_only is not None and (isinstance(self.head_only, bool) or not isinstance(self.head_only, int)
                                            or self.head_only < 0):
             raise ValueError(f"head_only must be a whole number of questions, not {self.head_only!r}")
@@ -2169,7 +2174,7 @@ ORDER = ["loading", "allocator_cap", "weights", "attention", "padding_free", "li
          "max_grad_norm", "weight_decay", "length", "duration", "memory", "evaluation", "milestones", "milestone_weights", "milestone_engine",
          "data_checks",
          "source_weights", "max_length", "answers_only", "labels", "words", "bottleneck", "head_dropout", "keep",
-         "decode", "choice_head", "candidates_per_pass", "head_learning_rate", "head_only", "start_from",
+         "decode", "choice_head", "set_layers", "candidates_per_pass", "head_learning_rate", "head_only", "start_from",
          "generations",
          "max_completion_length", "temperature", "top_p", "top_k", "chat_template_kwargs", "data", "report_to",
          "output"]
