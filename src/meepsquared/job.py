@@ -741,10 +741,11 @@ class TrainingJob:
         of each group, a function (hypotheses, references) -> {metric: number}
         or its name as 'module:function' or 'file.py:function'. SFT only, on
         one process. milestone_growth (above 1): the milestones at growing
-        distances, the first at `milestones` of the planned steps and each
-        next one at milestone_growth times the step before (and the last
-        step), so that they come often at the start of a training and seldom
-        later; without it, at equal distances. See meepsquared._milestones.
+        distances, the first distance `milestones` of the planned steps and
+        each next distance milestone_growth times the one before (and the
+        last step), so that they come often at the start of a training and
+        seldom later; without it, at equal distances. See
+        meepsquared._milestones.
     preprocessed: SFT and choice: the folder of the data preprocessed by
         job.preprocess(cache_dir) (meepsquared._preprocess), read memory-mapped
         after the check that it was made from this job's inputs. Without it,
@@ -883,11 +884,11 @@ class TrainingJob:
         if self.milestone_growth is not None:
             if (isinstance(self.milestone_growth, bool) or not isinstance(self.milestone_growth, (int, float))
                     or not self.milestone_growth > 1):
-                raise ValueError(f"milestone_growth must be above 1, the factor from one milestone's step to the "
-                                 f"next, not {self.milestone_growth!r}")
+                raise ValueError(f"milestone_growth must be above 1, the factor from one distance between "
+                                 f"milestones to the next, not {self.milestone_growth!r}")
             if self.milestones is None:
                 raise ValueError("milestone_growth: no milestones; give milestones, the share of the planned steps "
-                                 "at the first milestone")
+                                 "before the first milestone")
         if self.milestone_eval is not None and self.milestones is None:
             raise ValueError("milestone_eval: no milestones; give milestones, the share of the steps between them")
         if self.task == "choice" and self.milestone_scorer is not None:

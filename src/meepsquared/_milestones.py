@@ -58,16 +58,22 @@ GROUP = "all"
 
 def steps(planned: int, share: float, growth: Optional[float] = None) -> list:
     """The steps of the milestones, and the last step. Without growth: every `share` of the planned steps, rounded
-    up. With it: the first at `share` of the planned steps, rounded up, and each next one at `growth` times the step
-    before, rounded up (at least one step later): the milestones come often at the start, where the scores move
-    fast, and seldom later."""
+    up. With it: the distances between milestones grow, the first `share` of the planned steps and each next one
+    `growth` times the one before; each milestone is the sum of the distances before it, rounded up (at least one
+    step after the one before). The milestones come often at the start, where the scores move fast, and seldom
+    later."""
     if growth is None:
         count = max(1, round(1 / share))
         return sorted({min(planned, math.ceil(planned * k / count)) for k in range(1, count + 1)})
-    found, step = set(), max(1, math.ceil(planned * share))
-    while step < planned:
+    found, distance, at, last = set(), planned * share, 0.0, 0
+    while True:
+        at += distance
+        # Rounded to a millionth first: a share written as distance / planned gives back its distance exactly
+        step = max(last + 1, math.ceil(round(at, 6)))
+        if step >= planned:
+            break
         found.add(step)
-        step = max(step + 1, math.ceil(step * growth))
+        last, distance = step, distance * growth
     return sorted(found | {planned})
 
 
@@ -75,8 +81,8 @@ def spacing_text(planned: int, share: float, growth: Optional[float] = None) -> 
     """Why the milestones are where they are, for a plan."""
     if growth is None:
         return f"every {share:g} of the {planned} planned steps, and the last"
-    return (f"the first at {share:g} of the {planned} planned steps, each next one at {growth:g} times the step "
-            "before, and the last: often at the start, seldom later")
+    return (f"the first after {share:g} of the {planned} planned steps, each distance between two {growth:g} times "
+            "the one before, and the last: often at the start, seldom later")
 
 
 def folder(output, step: int) -> Path:

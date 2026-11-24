@@ -158,13 +158,14 @@ def test_a_stop_at_a_milestones_step_waits_for_the_milestone(chat_tokenizer, tmp
 def test_milestones_at_growing_distances_come_often_at_the_start_and_seldom_later():
     from meepsquared import _milestones
 
-    assert _milestones.steps(10_000, 0.01, 1.5) == [100, 150, 225, 338, 507, 761, 1142, 1713, 2570, 3855, 5783,
-                                                     8675, 10_000]
-    # Each distance at least one step: no milestone twice at a small first step
-    assert _milestones.steps(20, 0.01, 1.2)[:4] == [1, 2, 3, 4] and _milestones.steps(20, 0.01, 1.2)[-1] == 20
+    # The distances grow: 500, 750, 1125, 1687.5, 2531.25, 3796.9, each milestone their sum rounded up
+    assert _milestones.steps(11_931, 500 / 11_931, 1.5) == [500, 1250, 2375, 4063, 6594, 10_391, 11_931]
+    # Each milestone at least one step after the one before: none twice at a small first distance
+    small = _milestones.steps(20, 0.01, 1.2)
+    assert small[:3] == [1, 2, 3] and small == sorted(set(small)) and small[-1] == 20
     # Without growth, equal distances as before
     assert _milestones.steps(100, 0.25) == [25, 50, 75, 100]
-    assert "1.5 times the step before" in _milestones.spacing_text(10_000, 0.01, 1.5)
+    assert "1.5 times the one before" in _milestones.spacing_text(10_000, 0.01, 1.5)
 
 
 def test_milestone_growth_is_above_one_and_needs_milestones():
