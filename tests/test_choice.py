@@ -455,3 +455,48 @@ def test_a_saved_head_of_other_layers_is_refused(tokenizer, tmp_path):
     other.head = _choice.build_head(32, "set", set_layers=2)
     with pytest.raises(ValueError, match="the saved head is not this head"):
         _choice.load(other, tmp_path / "head")
+
+
+def test_a_row_names_its_none_candidate_by_index():
+    row = {**rows(1)[0], "none": 1}
+    _choice.check_row(row, 0, "data", True, False, none=True)
+    for bad in (2, -1, True, "1"):
+        with pytest.raises(ValueError, match="'none' must be the index"):
+            _choice.check_row({**row, "none": bad}, 0, "data", True, False)
+    with pytest.raises(ValueError, match="'none' is required"):
+        _choice.check_row(rows(1)[0], 0, "data", True, False, none=True)
+
+
+def test_the_none_output_learns_the_none_mass_and_the_rest_the_choice_among_the_others():
+    torch.manual_seed(0)
+    head = _choice.build_head(32, "set", none_output=True)
+    leaves = torch.randn(4, 32)
+    z, states = _choice.outputs(head, leaves)
+    # It starts at a probability of 0.5
+    assert float(torch.sigmoid(_choice.none_logit(head, states, 3))) == pytest.approx(0.5)
+    log2 = torch.log(torch.tensor(2.0))
+    # All the mass on none: the loss is the none output's alone
+    assert _choice.choice_loss(head, z, states, [0, 0, 0, 1], 3) == pytest.approx(float(log2))
+    # None of it on none: the none output's loss plus the cross-entropy of the choice among the others
+    others = -(torch.tensor([0.5, 0.5, 0.0]) * z[:3].log_softmax(-1)).sum()
+    assert _choice.choice_loss(head, z, states, [0.5, 0.5, 0, 0], 3) == pytest.approx(float(log2 + others), rel=1e-5)
+    with pytest.raises(ValueError, match="names no none candidate"):
+        _choice.choice_loss(head, z, states, [0.5, 0.5, 0, 0], None)
+    with torch.no_grad():
+        head["none_output"].bias.fill_(2.0)
+    assert _choice.choose(head, z, states, 3)[0] == 3
+    with torch.no_grad():
+        head["none_output"].bias.fill_(-2.0)
+    best, probability = _choice.choose(head, z, states, 3)
+    assert best != 3 and probability < 1 - float(torch.sigmoid(torch.tensor(-2.0))) + 1e-6
+    with pytest.raises(ValueError, match="none_output must be True or False"):
+        m2.Recipe(none_output="yes")
+
+
+def test_a_job_with_the_none_output_needs_every_row_to_name_its_none_candidate(tokenizer, tmp_path):
+    with pytest.raises(ValueError, match="data row 0: 'none' is required"):
+        make_job(tokenizer, tmp_path, recipe={"none_output": True}).plan()
+    named = [{**r, "none": len(r["candidates"]) - 1} for r in rows()]
+    plan = make_job(tokenizer, tmp_path, output="named", data=write(tmp_path / "named.jsonl", named),
+                    recipe={"none_output": True}).plan()
+    assert plan["none_output"].value is True

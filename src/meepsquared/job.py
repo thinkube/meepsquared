@@ -44,7 +44,8 @@ SCHEDULES = ("constant", "cosine", "linear", "ramped_linear")
 # The methods of a choice job (see meepsquared._choice_job)
 CHOICE_METHODS = ("lora", "qlora", "fp8", "nvfp4")
 # The Recipe fields of a choice job alone
-CHOICE_RECIPE = ("choice_head", "head_learning_rate", "candidates_per_pass", "head_only", "set_layers")
+CHOICE_RECIPE = ("choice_head", "head_learning_rate", "candidates_per_pass", "head_only", "set_layers",
+                 "none_output")
 # The Recipe fields a choice job refuses
 NOT_CHOICE_RECIPE = ("tokens_per_update", "optimizer", "max_length", "experts")
 # The Recipe fields of a tagging job alone
@@ -282,7 +283,10 @@ class Recipe:
     candidates_per_pass, the candidates read together after the shared text
     (4); head_only, the first questions of the data that train the head alone,
     the adapter frozen (500); set_layers, the set head's attention layers
-    over the candidates, each over the previous one's output (1). schedule also takes "ramped_linear", a choice
+    over the candidates, each over the previous one's output (1); none_output,
+    a separate output of the probability that no candidate applies, before
+    the choice among the others: each row then names its none candidate by
+    its index, 'none' (False). schedule also takes "ramped_linear", a choice
     job's only schedule (a linear warm-up times a linear decay to 0).
     """
 
@@ -321,6 +325,7 @@ class Recipe:
     candidates_per_pass: Optional[int] = None
     head_only: Optional[int] = None
     set_layers: Optional[int] = None
+    none_output: Optional[bool] = None
 
     def __post_init__(self):
         from meepsquared import _choice, _tagging, _tagging_job
@@ -330,6 +335,8 @@ class Recipe:
         _check_positive("head_learning_rate", self.head_learning_rate, (int, float))
         _check_positive("candidates_per_pass", self.candidates_per_pass)
         _check_positive("set_layers", self.set_layers)
+        if self.none_output is not None and not isinstance(self.none_output, bool):
+            raise ValueError(f"none_output must be True or False, not {self.none_output!r}")
         if self.set_layers is not None and self.choice_head == "scalar":
             raise ValueError("set_layers are the set head's; the scalar head has none")
         if self.head_only is not None and (isinstance(self.head_only, bool) or not isinstance(self.head_only, int)
@@ -2174,7 +2181,7 @@ ORDER = ["loading", "allocator_cap", "weights", "attention", "padding_free", "li
          "max_grad_norm", "weight_decay", "length", "duration", "memory", "evaluation", "milestones", "milestone_weights", "milestone_engine",
          "data_checks",
          "source_weights", "max_length", "answers_only", "labels", "words", "bottleneck", "head_dropout", "keep",
-         "decode", "choice_head", "set_layers", "candidates_per_pass", "head_learning_rate", "head_only", "start_from",
+         "decode", "choice_head", "set_layers", "none_output", "candidates_per_pass", "head_learning_rate", "head_only", "start_from",
          "generations",
          "max_completion_length", "temperature", "top_p", "top_k", "chat_template_kwargs", "data", "report_to",
          "output"]

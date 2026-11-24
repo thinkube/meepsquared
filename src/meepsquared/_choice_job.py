@@ -60,6 +60,7 @@ HEAD_ONLY = 500
 CANDIDATES_PER_PASS = 4
 HEAD = "set"
 SET_LAYERS = 1
+NONE_OUTPUT = False
 WEIGHT_DECAY = 0.0
 MAX_GRAD_NORM = 1.0
 SCHEDULE = "ramped_linear"
@@ -127,13 +128,14 @@ class ChoiceTrainer(Trainer):
         trains = int(inputs["position"]) >= s["head_only"]
         for p in chooser.adapter():
             p.requires_grad_(trains)
-        loss = chooser.question_loss(row["shared"], row["own"], row["target"], trains) / s["effective_batch"]
+        loss = chooser.question_loss(row["shared"], row["own"], row["target"], trains,
+                                     row.get("none")) / s["effective_batch"]
         return (loss, None) if return_outputs else loss
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
         row = self.settings["eval_rows"][int(inputs["row"])]
         with torch.no_grad():
-            loss = self.model.question_loss(row["shared"], row["own"], row["target"], False)
+            loss = self.model.question_loss(row["shared"], row["own"], row["target"], False, row.get("none"))
         return loss.detach(), None, None
 
     def create_optimizer(self, model=None):
@@ -317,7 +319,7 @@ def attention_of(job) -> str:
 
 
 def _answering_chooser(job, method: str, attention: str, rank: int, alpha: int, names: list, kind: str,
-                       set_layers: int, per_pass: int, pad_id: int):
+                       set_layers: int, none_output: bool, per_pass: int, pad_id: int):
     """A second copy of the base loaded as `method`, with the same adapter's shape and head, frozen, in evaluation
     mode: the milestones' rows are answered on it once the training's adapter and head are copied in."""
     from meepsquared.models import MeepLanguageModel
@@ -332,7 +334,8 @@ def _answering_chooser(job, method: str, attention: str, rank: int, alpha: int, 
                                             target_modules=_language_model_targets(model, names),
                                             use_gradient_checkpointing=False, fused_lora=False, compile_layers=False)
     decoder = peft.get_base_model().get_decoder()
-    head = _choice.build_head(decoder.config.hidden_size, kind, set_layers).to(next(decoder.parameters()).device)
+    head = _choice.build_head(decoder.config.hidden_size, kind, set_layers,
+                              none_output).to(next(decoder.parameters()).device)
     answering = _choice.Chooser(peft, decoder, head, kind, per_pass, pad_id)
     for p in answering.parameters():
         p.requires_grad_(False)
@@ -361,6 +364,13 @@ def prepare(job):
     if folder is None:
         folder = _choice.preprocess(job, Path(output) / PREPROCESSED, say=_say).folder
     rows, eval_rows, report = _choice.open_folder(folder, _choice.inputs(job, tokenizer))
+    none_output = recipe.none_output if recipe.none_output is not None else NONE_OUTPUT
+    if none_output:
+        for where, found in (("data", rows), ("eval_data", eval_rows or [])):
+            missing = next((i for i, r in enumerate(found) if r.get("none") is None), None)
+            if missing is not None:
+                raise ValueError(f"{where} row {missing}: 'none' is required with the head's none output: the index "
+                                 "of the candidate that says no candidate applies")
 
     # The model, the adapter and the head
     model = _load(job, decisions)
@@ -407,10 +417,11 @@ def prepare(job):
     set_layers = recipe.set_layers if recipe.set_layers is not None else SET_LAYERS
     per_pass = recipe.candidates_per_pass if recipe.candidates_per_pass is not None else CANDIDATES_PER_PASS
     torch.manual_seed(SEED)
-    head = _choice.build_head(decoder.config.hidden_size, kind, set_layers).to(device)
+    head = _choice.build_head(decoder.config.hidden_size, kind, set_layers, none_output).to(device)
     chooser = _choice.Chooser(peft, decoder, head, kind, per_pass, tokenizer.pad_token_id)
     model_name = job.model if isinstance(job.model, str) else str(model.config._name_or_path)
-    config = {"head": kind, "set_layers": set_layers, "model": model_name, "method": job.method,
+    config = {"head": kind, "set_layers": set_layers, "none_output": none_output, "model": model_name,
+              "method": job.method,
               "candidates_per_pass": per_pass}
     chooser._meepsquared = {"choice": config}
     decisions.append(_decide("rank", "LoRA rank", recipe.rank, RANK, str, REFERENCE))
@@ -431,6 +442,12 @@ def prepare(job):
     decisions.append(_decide("candidates_per_pass", "per pass", recipe.candidates_per_pass, CANDIDATES_PER_PASS,
                              lambda n: f"{n} candidates read together after the shared text, which is read once",
                              REFERENCE))
+    decisions.append(_decide("none_output", "none output", recipe.none_output, NONE_OUTPUT,
+                             lambda on: ("a separate output of the probability that no candidate applies, from the "
+                                         "none candidate's state beside the others' largest; above 0.5 the answer is "
+                                         "the none candidate, else the choice among the others" if on else "none: "
+                                         "the none candidate, if any, is one of the candidates"),
+                             "the head of the reference choice training has none"))
 
     # The length, and a start from a saved state
     effective = recipe.effective_batch if recipe.effective_batch is not None else EFFECTIVE_BATCH
@@ -543,7 +560,7 @@ def prepare(job):
     if job.milestone_weights is not None and job.milestone_weights != job.method:
         answering = (job.milestone_weights,
                      _answering_chooser(job, job.milestone_weights, attention_of(job), rank, alpha, names, kind,
-                                        set_layers, per_pass, tokenizer.pad_token_id))
+                                        set_layers, none_output, per_pass, tokenizer.pad_token_id))
         decisions.append(Decision("milestone_weights", "milestone weights", job.milestone_weights,
                                   f"a second copy of the base loaded as {job.milestone_weights} answers the "
                                   "milestones' rows, the adapter and the head copied into it at each milestone",
@@ -557,7 +574,7 @@ def prepare(job):
         milestone_at = [s for s in _milestones.steps(total, job.milestones) if s > start_step]
         if job.milestone_eval is not None:
             milestone_rows, _ = _choice.read_encoded(job.milestone_eval, tokenizer, "milestone_eval", target=False,
-                                                     right=True)
+                                                     right=True, none=none_output)
 
     # The time per step, and the memory, from steps timed on the question of the most tokens read and on the median
     # one, each step priced on the line through the two at the mean question

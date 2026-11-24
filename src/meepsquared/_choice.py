@@ -49,6 +49,8 @@ import torch
 from torch import nn
 
 HEADS = ("set", "scalar")
+# The none output's probability above which a question's answer is its none candidate
+NONE_THRESHOLD = 0.5
 # The set attention's width and heads
 SET_WIDTH = 128
 SET_HEADS = 4
@@ -63,7 +65,7 @@ SUM_TOLERANCE = 1e-6
 # The marker the last user message's content ends with when the chat template is rendered
 MARKER = "\x00"
 # The shape of a preprocessed folder's files and report; part of its key, so a folder of another shape is not read
-FORMAT = 2
+FORMAT = 3
 # The prefix of the head's parameters among the trainable ones, in a saved state
 HEAD_PREFIX = "head."
 # The keys of a start_from file, and of each parameter's optimizer state in it
@@ -111,9 +113,9 @@ def _number(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def check_row(row, i: int, where: str, target: bool, right: bool) -> None:
-    """Refuse a row that is not a question as the module's docstring says; `target` and `right` say which of those
-    fields the row must have."""
+def check_row(row, i: int, where: str, target: bool, right: bool, none: bool = False) -> None:
+    """Refuse a row that is not a question as the module's docstring says; `target`, `right` and `none` say which of
+    those fields the row must have."""
     at = f"{where} row {i}"
     if not isinstance(row, dict):
         raise ValueError(f"{at}: a row is a mapping, not {type(row).__name__}")
@@ -150,6 +152,13 @@ def check_row(row, i: int, where: str, target: bool, right: bool) -> None:
         raise ValueError(f"{at}: 'right' must be {k} booleans, one per candidate")
     if row.get("group") is not None and not isinstance(row["group"], str):
         raise ValueError(f"{at}: 'group' must be a text")
+    index = row.get("none")
+    if index is None:
+        if none:
+            raise ValueError(f"{at}: 'none' is required with the head's none output: the index of the candidate that "
+                             "says no candidate applies")
+    elif isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < k:
+        raise ValueError(f"{at}: 'none' must be the index of one of the {k} candidates, not {index!r}")
 
 
 def encode(tokenizer, row: dict) -> dict:
@@ -169,10 +178,10 @@ def encode(tokenizer, row: dict) -> dict:
     if not shared or not all(own):
         raise ValueError("a question's shared text or a candidate makes no tokens")
     return {"shared": shared, "own": own, "target": row.get("target"), "right": row.get("right"),
-            "group": row.get("group")}
+            "group": row.get("group"), "none": row.get("none")}
 
 
-def read_encoded(data, tokenizer, where: str, target: bool, right: bool) -> tuple:
+def read_encoded(data, tokenizer, where: str, target: bool, right: bool, none: bool = False) -> tuple:
     """(encoded rows, source) of `data` (see read_rows), each row checked; `data` may also be a list of rows."""
     if isinstance(data, list) and data and all(isinstance(r, dict) for r in data):
         rows, source = data, "the rows given"
@@ -180,7 +189,7 @@ def read_encoded(data, tokenizer, where: str, target: bool, right: bool) -> tupl
         rows, source = read_rows(data, where)
     encoded = []
     for i, row in enumerate(rows):
-        check_row(row, i, where, target, right)
+        check_row(row, i, where, target, right, none)
         try:
             encoded.append(encode(tokenizer, row))
         except ValueError as error:
@@ -201,9 +210,10 @@ def set_attention_name(layer: int) -> str:
     return "set_attention" if layer == 1 else f"set_attention_{layer}"
 
 
-def build_head(hidden: int, kind: str, set_layers: int = 1) -> nn.ModuleDict:
+def build_head(hidden: int, kind: str, set_layers: int = 1, none_output: bool = False) -> nn.ModuleDict:
     """The head of `kind` for states of `hidden` dimensions, its modules named as a saved state names them; the set
-    head with `set_layers` attention layers over the candidates."""
+    head with `set_layers` attention layers over the candidates; with `none_output`, a separate output of the
+    probability that no candidate applies (see none_logit), which starts at 0.5."""
     if kind not in HEADS:
         raise ValueError(f"the head is one of {HEADS}, not {kind!r}")
     if set_layers < 1 or (kind != "set" and set_layers != 1):
@@ -216,21 +226,28 @@ def build_head(hidden: int, kind: str, set_layers: int = 1) -> nn.ModuleDict:
             modules[set_attention_name(layer)] = nn.MultiheadAttention(SET_WIDTH, SET_HEADS, dropout=0.0,
                                                                        batch_first=True)
         modules["set_output"] = nn.Linear(SET_WIDTH, 1)
+    if none_output:
+        modules["none_output"] = nn.Linear(2 * (SET_WIDTH if kind == "set" else hidden), 1)
     head = nn.ModuleDict(modules)
     nn.init.normal_(head["scalar"].weight, std=0.02)
     nn.init.zeros_(head["scalar"].bias)
     if kind == "set":
         nn.init.zeros_(head["set_output"].weight)
         nn.init.zeros_(head["set_output"].bias)
+    if none_output:
+        nn.init.zeros_(head["none_output"].weight)
+        nn.init.zeros_(head["none_output"].bias)
     return head
 
 
-def scores(head: nn.ModuleDict, leaves: torch.Tensor) -> torch.Tensor:
-    """The head on the last states of the candidates of one question: the scalar score, plus with "set" the change
-    its attention layers over the candidates make, each over the previous one's output. In float32."""
+def outputs(head: nn.ModuleDict, leaves: torch.Tensor) -> tuple:
+    """(scores, states) of the candidates of one question from their last states: the scalar score, plus with "set"
+    the change its attention layers over the candidates make, each over the previous one's output; the states are
+    what the none output reads, the set head's last ones or the normed last states. In float32."""
     with torch.autocast(leaves.device.type, enabled=False):
         h = head["norm"](leaves.float())
         z = head["scalar"](h).squeeze(-1)
+        states = h
         if "set_project" in head:
             log_k = torch.full((len(h), 1), math.log(len(h)), device=h.device)
             u = head["set_project"](torch.cat([h, log_k], dim=-1))[None]
@@ -240,7 +257,57 @@ def scores(head: nn.ModuleDict, leaves: torch.Tensor) -> torch.Tensor:
                 u = torch.tanh(u + mixed)
                 layer += 1
             z = z + head["set_output"](u).squeeze(-1)[0]
-    return z
+            states = u[0]
+    return z, states
+
+
+def scores(head: nn.ModuleDict, leaves: torch.Tensor) -> torch.Tensor:
+    """The head's scores of the candidates of one question (see outputs)."""
+    return outputs(head, leaves)[0]
+
+
+def none_logit(head: nn.ModuleDict, states: torch.Tensor, none: int) -> torch.Tensor:
+    """The logit of the probability that no candidate applies: the none output on the none candidate's state beside
+    the largest of the other candidates' states, feature by feature."""
+    others = torch.cat([states[:none], states[none + 1:]])
+    with torch.autocast(states.device.type, enabled=False):
+        return head["none_output"](torch.cat([states[none], others.max(0).values]).float()).squeeze(-1)
+
+
+def choice_loss(head: nn.ModuleDict, z: torch.Tensor, states: torch.Tensor, target: list,
+                none: Optional[int]) -> torch.Tensor:
+    """The loss of one question. Without a none output: -(target * log_softmax(z)).sum() over all candidates. With
+    it: the binary cross-entropy of the none output against the none candidate's target mass t, plus
+    -(target * log_softmax(z)).sum() over the other candidates, whose target sums to 1 - t: the cross-entropy of
+    the choice among them given that one applies, weighted by 1 - t, 0 when t is 1."""
+    t = torch.tensor(target, device=z.device, dtype=z.dtype)
+    if "none_output" not in head:
+        return -(t * z.log_softmax(-1)).sum()
+    if none is None:
+        raise ValueError("the head has a none output, and the question names no none candidate")
+    keep = [i for i in range(len(target)) if i != none]
+    n = none_logit(head, states, none)
+    return (nn.functional.binary_cross_entropy_with_logits(n, t[none])
+            - (t[keep] * z[keep].log_softmax(-1)).sum())
+
+
+def choose(head: nn.ModuleDict, z: torch.Tensor, states: torch.Tensor, none: Optional[int]) -> tuple:
+    """(the chosen candidate, its probability). Without a none output: the softmax's top candidate. With it: the
+    none candidate when the none output's probability is above 0.5, else the top of the other candidates, its
+    probability times the probability that one applies."""
+    if "none_output" not in head:
+        p = z.softmax(-1)
+        best = int(p.argmax())
+        return best, float(p[best])
+    if none is None:
+        raise ValueError("the head has a none output, and the question names no none candidate")
+    p_none = float(torch.sigmoid(none_logit(head, states, none)))
+    if p_none > NONE_THRESHOLD:
+        return none, p_none
+    keep = [i for i in range(len(z)) if i != none]
+    p = z[keep].softmax(-1)
+    best = int(p.argmax())
+    return keep[best], (1 - p_none) * float(p[best])
 
 
 class Chooser(nn.Module):
@@ -283,9 +350,9 @@ class Chooser(nn.Module):
         found.update({HEAD_PREFIX + n: p for n, p in self.head.named_parameters()})
         return found
 
-    def forward(self, shared: list, own: list, target: list, grad: bool) -> torch.Tensor:
+    def forward(self, shared: list, own: list, target: list, grad: bool, none: Optional[int] = None) -> torch.Tensor:
         """The loss of one question (see question_loss)."""
-        return self.question_loss(shared, own, target, grad)
+        return self.question_loss(shared, own, target, grad, none)
 
     def _suffix(self, cache, prefix_len: int, own: list) -> torch.Tensor:
         """The last states of the candidates `own`, read after the shared cache."""
@@ -331,9 +398,9 @@ class Chooser(nn.Module):
                 parts.append(self._suffix(cache, len(shared), group))
         return torch.cat(parts)
 
-    def scores(self, shared: list, own: list, grad: bool) -> torch.Tensor:
-        """The head's scores of the candidates of one question; with grad False, the model is read without
-        gradients."""
+    def outputs(self, shared: list, own: list, grad: bool) -> tuple:
+        """The head's (scores, states) of the candidates of one question (see outputs); with grad False, the model
+        is read without gradients."""
         device = self.device
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
             if grad:
@@ -341,14 +408,19 @@ class Chooser(nn.Module):
             else:
                 with torch.no_grad():
                     leaves = self.leaves(shared, own, grad=False)
-        return scores(self.head, leaves)
+        return outputs(self.head, leaves)
 
-    def question_loss(self, shared: list, own: list, target: list, grad: bool) -> torch.Tensor:
-        """-(target * log_softmax(scores)).sum(); with grad False the language model reads without gradients and
-        only the head learns."""
-        z = self.scores(shared, own, grad)
-        t = torch.tensor(target, device=z.device, dtype=z.dtype)
-        return -(t * z.log_softmax(-1)).sum()
+    def scores(self, shared: list, own: list, grad: bool) -> torch.Tensor:
+        """The head's scores of the candidates of one question."""
+        return self.outputs(shared, own, grad)[0]
+
+    def question_loss(self, shared: list, own: list, target: list, grad: bool,
+                      none: Optional[int] = None) -> torch.Tensor:
+        """The loss of one question (see choice_loss); with grad False the language model reads without gradients
+        and only the head learns. none: the index of the question's none candidate, for a head with a none
+        output."""
+        z, states = self.outputs(shared, own, grad)
+        return choice_loss(self.head, z, states, target, none)
 
 
 def answer(chooser: Chooser, rows: list) -> list:
@@ -360,9 +432,8 @@ def answer(chooser: Chooser, rows: list) -> list:
     try:
         with torch.no_grad():
             for row in rows:
-                p = chooser.scores(row["shared"], row["own"], grad=False).softmax(-1)
-                best = int(p.argmax())
-                found.append((best, float(p[best])))
+                z, states = chooser.outputs(row["shared"], row["own"], grad=False)
+                found.append(choose(chooser.head, z, states, row.get("none")))
     finally:
         chooser.train(training)
     return found
