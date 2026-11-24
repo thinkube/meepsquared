@@ -740,7 +740,11 @@ class TrainingJob:
         optionally "group" and "source"}; milestone_scorer scores the answers
         of each group, a function (hypotheses, references) -> {metric: number}
         or its name as 'module:function' or 'file.py:function'. SFT only, on
-        one process. See meepsquared._milestones.
+        one process. milestone_growth (above 1): the milestones at growing
+        distances, the first at `milestones` of the planned steps and each
+        next one at milestone_growth times the step before (and the last
+        step), so that they come often at the start of a training and seldom
+        later; without it, at equal distances. See meepsquared._milestones.
     preprocessed: SFT and choice: the folder of the data preprocessed by
         job.preprocess(cache_dir) (meepsquared._preprocess), read memory-mapped
         after the check that it was made from this job's inputs. Without it,
@@ -775,6 +779,7 @@ class TrainingJob:
     eval_every: Optional[int] = None
     timed_steps: Optional[int] = None
     milestones: Optional[float] = None
+    milestone_growth: Optional[float] = None
     milestone_eval: Any = None
     milestone_scorer: Any = None
     tokenizer: Any = None
@@ -875,6 +880,14 @@ class TrainingJob:
                                             or not 0 < self.milestones <= 1):
             raise ValueError(f"milestones must be the share of the planned steps between milestones, above 0 and at "
                              f"most 1, not {self.milestones!r}")
+        if self.milestone_growth is not None:
+            if (isinstance(self.milestone_growth, bool) or not isinstance(self.milestone_growth, (int, float))
+                    or not self.milestone_growth > 1):
+                raise ValueError(f"milestone_growth must be above 1, the factor from one milestone's step to the "
+                                 f"next, not {self.milestone_growth!r}")
+            if self.milestones is None:
+                raise ValueError("milestone_growth: no milestones; give milestones, the share of the planned steps "
+                                 "at the first milestone")
         if self.milestone_eval is not None and self.milestones is None:
             raise ValueError("milestone_eval: no milestones; give milestones, the share of the steps between them")
         if self.task == "choice" and self.milestone_scorer is not None:
@@ -996,6 +1009,7 @@ class TrainingJob:
                "eval_data": _as_data(self.eval_data),
                "eval_split": self.eval_split, "eval_share": self.eval_share, "eval_every": self.eval_every,
                "timed_steps": self.timed_steps, "milestones": self.milestones,
+               "milestone_growth": self.milestone_growth,
                "preprocessed": str(self.preprocessed) if self.preprocessed is not None else None,
                "milestone_eval": str(self.milestone_eval) if self.milestone_eval is not None else None,
                "start_from": str(self.start_from) if self.start_from is not None else None,
@@ -2083,10 +2097,10 @@ class TrainingJob:
         if self.milestones is not None:
             if int(os.environ.get("WORLD_SIZE", "1")) > 1:
                 raise ValueError("milestones run on one process, and this training runs on several")
-            milestone_at = _milestones.steps(planned, self.milestones)
+            milestone_at = _milestones.steps(planned, self.milestones, self.milestone_growth)
             each = None
             what = f"the adapter saved apart in {output}/{_milestones.FOLDER}/step-<N>"
-            why = f"every {self.milestones:g} of the {planned} planned steps, and the last"
+            why = _milestones.spacing_text(planned, self.milestones, self.milestone_growth)
             if self.milestone_eval is not None:
                 milestone_rows = _milestones.rows(self.milestone_eval)
                 for row in milestone_rows:
@@ -2115,7 +2129,8 @@ class TrainingJob:
                     why += f"; the generation: {generation_why}; the scorer's time is not counted"
             decisions.append(Decision("milestones", "milestones",
                                       {"steps": milestone_at, "generation_seconds": each},
-                                      f"{len(milestone_at)} at steps {_steps_text(milestone_at)}: {what}", why))
+                                      f"{len(milestone_at)} at steps "
+                                      f"{_steps_text(milestone_at, self.milestone_growth is not None)}: {what}", why))
         else:
             decisions.append(Decision("milestones", "milestones", None, "none", "no milestones given"))
         duration = "not timed"
@@ -2187,9 +2202,9 @@ ORDER = ["loading", "allocator_cap", "weights", "attention", "padding_free", "li
          "output"]
 
 
-def _steps_text(steps: list) -> str:
-    """Steps as a short list: all of them up to six, else the first three, an ellipsis and the last."""
-    shown = steps if len(steps) <= 6 else steps[:3] + ["..."] + steps[-1:]
+def _steps_text(steps: list, whole: bool = False) -> str:
+    """Steps as a short list: all of them up to six (or whole), else the first three, an ellipsis and the last."""
+    shown = steps if whole or len(steps) <= 6 else steps[:3] + ["..."] + steps[-1:]
     return ", ".join(f"{s:,}" if isinstance(s, int) else s for s in shown)
 
 

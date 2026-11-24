@@ -571,7 +571,7 @@ def prepare(job):
                                   "as given" if job.milestone_weights is not None else "no milestone_weights given"))
     milestone_at = milestone_rows = None
     if job.milestones is not None:
-        milestone_at = [s for s in _milestones.steps(total, job.milestones) if s > start_step]
+        milestone_at = [s for s in _milestones.steps(total, job.milestones, job.milestone_growth) if s > start_step]
         if job.milestone_eval is not None:
             milestone_rows, _ = _choice.read_encoded(job.milestone_eval, tokenizer, "milestone_eval", target=False,
                                                      right=True, none=none_output)
@@ -625,8 +625,9 @@ def prepare(job):
             if milestone_each is not None:
                 what += f"; each about {_sessions.duration_text(milestone_each)}"
         decisions.append(Decision("milestones", "milestones", {"steps": milestone_at, "seconds": milestone_each},
-                                  f"{len(milestone_at)} at steps {_steps_text(milestone_at)}: {what}",
-                                  f"every {job.milestones:g} of the {total} planned steps, and the last"))
+                                  f"{len(milestone_at)} at steps "
+                                  f"{_steps_text(milestone_at, job.milestone_growth is not None)}: {what}",
+                                  _milestones.spacing_text(total, job.milestones, job.milestone_growth)))
     else:
         decisions.append(Decision("milestones", "milestones", None, "none", "no milestones given"))
     duration = "not timed"

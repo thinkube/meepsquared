@@ -153,3 +153,27 @@ def test_a_stop_at_a_milestones_step_waits_for_the_milestone(chat_tokenizer, tmp
     result = job.train(stop_file=stop)
     assert result.paused and result.steps == 3
     assert (tmp_path / "out" / "milestones" / "step-3" / "milestone.json").exists()
+
+
+def test_milestones_at_growing_distances_come_often_at_the_start_and_seldom_later():
+    from meepsquared import _milestones
+
+    assert _milestones.steps(10_000, 0.01, 1.5) == [100, 150, 225, 338, 507, 761, 1142, 1713, 2570, 3855, 5783,
+                                                     8675, 10_000]
+    # Each distance at least one step: no milestone twice at a small first step
+    assert _milestones.steps(20, 0.01, 1.2)[:4] == [1, 2, 3, 4] and _milestones.steps(20, 0.01, 1.2)[-1] == 20
+    # Without growth, equal distances as before
+    assert _milestones.steps(100, 0.25) == [25, 50, 75, 100]
+    assert "1.5 times the step before" in _milestones.spacing_text(10_000, 0.01, 1.5)
+
+
+def test_milestone_growth_is_above_one_and_needs_milestones():
+    import meepsquared as m2
+
+    for bad in (1, 0.5, True, "2"):
+        with pytest.raises(ValueError, match="milestone_growth must be above 1"):
+            m2.TrainingJob(model="x", data="d.jsonl", milestones=0.01, milestone_growth=bad)
+    with pytest.raises(ValueError, match="give milestones"):
+        m2.TrainingJob(model="x", data="d.jsonl", milestone_growth=1.5)
+    job = m2.TrainingJob(model="x", data="d.jsonl", milestones=0.01, milestone_growth=1.5)
+    assert m2.TrainingJob.from_dict(job.to_dict()).milestone_growth == 1.5

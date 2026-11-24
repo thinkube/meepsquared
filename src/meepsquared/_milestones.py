@@ -56,10 +56,27 @@ FOLDER = "milestones"
 GROUP = "all"
 
 
-def steps(planned: int, share: float) -> list:
-    """The steps of the milestones: every `share` of the planned steps, rounded up, and the last step."""
-    count = max(1, round(1 / share))
-    return sorted({min(planned, math.ceil(planned * k / count)) for k in range(1, count + 1)})
+def steps(planned: int, share: float, growth: Optional[float] = None) -> list:
+    """The steps of the milestones, and the last step. Without growth: every `share` of the planned steps, rounded
+    up. With it: the first at `share` of the planned steps, rounded up, and each next one at `growth` times the step
+    before, rounded up (at least one step later): the milestones come often at the start, where the scores move
+    fast, and seldom later."""
+    if growth is None:
+        count = max(1, round(1 / share))
+        return sorted({min(planned, math.ceil(planned * k / count)) for k in range(1, count + 1)})
+    found, step = set(), max(1, math.ceil(planned * share))
+    while step < planned:
+        found.add(step)
+        step = max(step + 1, math.ceil(step * growth))
+    return sorted(found | {planned})
+
+
+def spacing_text(planned: int, share: float, growth: Optional[float] = None) -> str:
+    """Why the milestones are where they are, for a plan."""
+    if growth is None:
+        return f"every {share:g} of the {planned} planned steps, and the last"
+    return (f"the first at {share:g} of the {planned} planned steps, each next one at {growth:g} times the step "
+            "before, and the last: often at the start, seldom later")
 
 
 def folder(output, step: int) -> Path:
