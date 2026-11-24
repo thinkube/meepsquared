@@ -21,6 +21,16 @@ PARSE_LABELS = {"upos": ["NOUN", "VERB", "ADP", "PUNCT"], "lemma": ["l|0|", "o|0
 SENTENCES = [["今日", "は", "晴れ", "。"], ["the", "hare", "runs", "fast"], ["雨"]]
 
 
+class _ByHand(nn.Module):
+    def __init__(self, dense, down, up):
+        super().__init__()
+        self.dense, self.down, self.up = dense, down, up
+
+    def forward(self, x):
+        h = self.dense(x)
+        return h + self.up(nn.functional.gelu(self.down(h)))
+
+
 def reference(base, state, labels, words):
     """The labels and heads of one sentence computed without the package's engine: the adapters wrapped into a
     fresh copy of the encoder by hand."""
@@ -34,11 +44,7 @@ def reference(base, state, labels, words):
         down.load_state_dict({"weight": state[f"adapters.{i}.down.weight"], "bias": state[f"adapters.{i}.down.bias"]})
         up.load_state_dict({"weight": state[f"adapters.{i}.up.weight"], "bias": state[f"adapters.{i}.up.bias"]})
 
-        def adapted(x, dense=dense, down=down, up=up):
-            h = dense(x)
-            return h + up(nn.functional.gelu(down(h)))
-
-        layer.output.dense = adapted
+        layer.output.dense = _ByHand(dense, down, up)
     heads = tagger.Heads(HIDDEN, labels)
     heads.load_state_dict({k[len("heads."):]: v for k, v in state.items() if k.startswith("heads.")})
     encoded = AutoTokenizer.from_pretrained(base)(words, is_split_into_words=True, return_tensors="pt")
