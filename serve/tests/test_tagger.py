@@ -181,3 +181,19 @@ def test_a_part_that_does_not_fit_is_refused_when_it_loads(base, tmp_path):
 
 def test_the_tagger_kind_is_found_by_its_entry_point():
     assert meepserve.kinds()["tagger"] is tagger.KIND
+
+
+def test_a_closed_part_leaves_the_base_to_the_others(base, tmp_path):
+    engine = TransformersEncoder(base, "cpu")
+    first, _ = write_part(tmp_path / "a", "a", PARSE_LABELS, seed=1)
+    second, _ = write_part(tmp_path / "b", "b", PARSE_LABELS, seed=2)
+    a = meepserve.load(first, engine=engine)
+    b = meepserve.load(second, engine=engine)
+    request = {"sentences": SENTENCES}
+    before = b.answer(request)
+    a.close()
+    assert engine.names() == ["b"] and b.answer(request) == before
+    # Its name is free again: the same part loads on the same engine
+    assert meepserve.load(first, engine=engine).answer(request) == meepserve.load(first, base, device="cpu").answer(request)
+    with pytest.raises(ValueError, match="no adapters named a"):
+        a.close()

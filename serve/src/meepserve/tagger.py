@@ -383,6 +383,11 @@ class TaggerPart:
                 found[index] = answer
         return found
 
+    def close(self) -> None:
+        """The part's adapters removed from its engine; the part answers no more."""
+        self.engine.remove_bottlenecks(self.name)
+        self.heads = None
+
     def _empty(self, probabilities: list) -> dict:
         answer = {name: [] for name in self.heads.out}
         if self.heads.parser is not None:

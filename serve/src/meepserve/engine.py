@@ -88,6 +88,17 @@ class TransformersEncoder:
                                                                      "up.bias")})
             slot.adapters[name] = adapter.to(self.device).eval()
 
+    def remove_bottlenecks(self, name: str) -> None:
+        """The adapters of `name` removed from every layer."""
+        if not self.slots or name not in self.slots[0].adapters:
+            raise ValueError(f"the engine holds no adapters named {name}")
+        for slot in self.slots:
+            del slot.adapters[name]
+
+    def names(self) -> list:
+        """The names of the adapters the engine holds."""
+        return list(self.slots[0].adapters) if self.slots else []
+
     @contextlib.contextmanager
     def reading(self, name: Optional[str]):
         """While inside: the adapters of `name` active (None: the base alone), no gradients, and bfloat16 autocast

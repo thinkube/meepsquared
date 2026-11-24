@@ -19,8 +19,9 @@ of the base model. The base's own files are given apart, as a folder.
 A kind is found through the Python entry point group "meepserve.kinds": its
 object has name, formats, engine (the engine's name) and load(folder,
 contract, engine), which gives the part; a part has answer(request), a
-request and an answer being JSON objects. Several parts on one base share one
-engine when the same engine is given to each load.
+request and an answer being JSON objects, and close(), which removes what it
+added to its engine. Several parts on one base share one engine when the same
+engine is given to each load; the engine holds the base until it is dropped.
 """
 
 import json
