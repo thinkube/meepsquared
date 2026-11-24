@@ -476,10 +476,11 @@ def test_the_none_output_learns_the_none_mass_and_the_rest_the_choice_among_the_
     assert float(torch.sigmoid(_choice.none_logit(head, states, 3))) == pytest.approx(0.5)
     log2 = torch.log(torch.tensor(2.0))
     # All the mass on none: the loss is the none output's alone
-    assert _choice.choice_loss(head, z, states, [0, 0, 0, 1], 3) == pytest.approx(float(log2))
+    assert float(_choice.choice_loss(head, z, states, [0, 0, 0, 1], 3)) == pytest.approx(float(log2))
     # None of it on none: the none output's loss plus the cross-entropy of the choice among the others
     others = -(torch.tensor([0.5, 0.5, 0.0]) * z[:3].log_softmax(-1)).sum()
-    assert _choice.choice_loss(head, z, states, [0.5, 0.5, 0, 0], 3) == pytest.approx(float(log2 + others), rel=1e-5)
+    assert float(_choice.choice_loss(head, z, states, [0.5, 0.5, 0, 0], 3)) == pytest.approx(float(log2 + others),
+                                                                                         rel=1e-5)
     with pytest.raises(ValueError, match="names no none candidate"):
         _choice.choice_loss(head, z, states, [0.5, 0.5, 0, 0], None)
     with torch.no_grad():
