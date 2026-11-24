@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "meepserve"
+version = "0.1.0"
+description = "Trained parts on a base model (taggers, choice heads), served behind Thinkube's LLM gateway"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{ name = "Alejandro Martínez Corriá and the Thinkube contributors" }]
+requires-python = ">=3.12"
+# torch comes from the environment (the serving image, or PyTorch's wheel), as for Meep²
+dependencies = [
+    "transformers==5.20.2",
+    "numpy>=1.26",
+    "safetensors>=0.4",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+# The kinds of trained part this package serves; another package adds its own kinds under the same group
+[project.entry-points."meepserve.kinds"]
+tagger = "meepserve.tagger:KIND"
+
+[project.urls]
+Repository = "https://github.com/thinkube/meepsquared"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/meepserve"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
