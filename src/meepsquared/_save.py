@@ -5,8 +5,8 @@
 
 A merged save writes the base model with W + scaling * B @ A in place of each
 adapted weight, computed in float32 and stored in the model's dtype. A 4-bit
-base (QLoRA) or an FP8 one is dequantized first, every such layer of it, so
-the result is an ordinary 16-bit model. An expert stack of a mixture of
+base (QLoRA) or an FP8 one is dequantized first, every such layer of it and
+every NF4 expert stack, so the result is an ordinary 16-bit model. An expert stack of a mixture of
 experts is written the same way, every expert with its adapter merged in and
 an FP8 stack dequantized with its per-expert scale. The model is written
 tensor by tensor into safetensors shards of at most MAX_SHARD_BYTES, so the
@@ -123,6 +123,8 @@ def merged_tensors(peft_model) -> Iterator[tuple[str, torch.Tensor]]:
     from peft.tuners.lora import LoraLayer
     from peft.tuners.lora.layer import ParamWrapper
 
+    from meepsquared import _nf4_experts
+
     base = peft_model.get_base_model()
     dtype = base.get_input_embeddings().weight.dtype
     done = []  # modules whose parameters are written as a whole: a LoRA layer, a 4-bit layer, wrapped experts
@@ -150,6 +152,9 @@ def merged_tensors(peft_model) -> Iterator[tuple[str, torch.Tensor]]:
                 yield f"{prefix}bias", module.bias.detach().to(dtype).cpu()
             done.append(name)
             continue
+        # NF4 expert stacks (meepsquared._nf4_experts) are non-persistent buffers, written dequantized
+        for pname, stack in _nf4_experts.dequantized_stacks(module, dtype):
+            yield f"{prefix}{pname}", stack.cpu()
         for pname, value in list(module.named_parameters(recurse=False)) + list(module.named_buffers(recurse=False)):
             if pname in getattr(module, "_non_persistent_buffers_set", set()):
                 continue

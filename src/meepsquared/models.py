@@ -13,8 +13,8 @@ from typing import Any, Optional
 
 import torch
 
-from meepsquared import (_banner, _checkpointing, _compile, _fp8, _fused, _linear_attention, _liger, _moe, _save,
-                    _selective, _shared_vllm, _split, _unified_memory, _varlen)
+from meepsquared import (_banner, _checkpointing, _compile, _fp8, _fused, _linear_attention, _liger, _moe,
+                    _nf4_experts, _save, _selective, _shared_vllm, _split, _unified_memory, _varlen)
 
 DEFAULT_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 ATTENTION_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj"]
@@ -253,6 +253,13 @@ def _adapters_off_fp8(peft_model) -> int:
     return len(fp8)
 
 
+@contextlib.contextmanager
+def _stacked(outer, inner):
+    """outer entered, then inner: inner wraps what outer set."""
+    with outer, inner:
+        yield
+
+
 def four_bit_config(dtype: torch.dtype, double_quant: bool = True, quant_storage: Optional[torch.dtype] = None):
     """Transformers' BitsAndBytesConfig of NF4 weights computing in `dtype`, with or without double quantization."""
     from transformers import BitsAndBytesConfig
@@ -280,6 +287,7 @@ class MeepLanguageModel:
         quant_storage: Optional[torch.dtype] = None,
         double_quant: bool = True,
         shared_vllm: Optional[dict] = None,
+        experts_4bit: bool = True,
         **kwargs,
     ):
         """The model and its tokenizer, ready for get_peft_model.
@@ -303,6 +311,10 @@ class MeepLanguageModel:
             Not with load_in_4bit; on one GPU.
         double_quant: with load_in_4bit, the quantization constants quantized
             too (QLoRA's double quantization); False keeps them in 32 bits.
+        experts_4bit: with load_in_4bit, the expert stacks of a mixture of
+            experts held as NF4 too (see meepsquared._nf4_experts), which
+            bitsandbytes leaves in 16 bits; False keeps them in 16 bits, as
+            LoRA on the stacks (target_parameters) needs.
         quant_storage: the dtype bitsandbytes packs the 4-bit weights in; under
             FSDP2 the model's dtype (torch.bfloat16), so that a layer's weights
             share one dtype to be sharded.
@@ -360,6 +372,13 @@ class MeepLanguageModel:
             _shared_vllm.check_architecture(model_name)
             # The expert stacks are not read: vLLM's take their place once it has loaded
             loading = _shared_vllm.trainer_without_stacks(f"cuda:{gpu_index}")
+        nf4_stacks = None
+        if load_in_4bit and experts_4bit:
+            # The stacks the checkpoint stores as one tensor each are not read with the rest, and are read after
+            # one at a time into NF4; a checkpoint of one tensor per expert is quantized once loaded
+            nf4_stacks = _nf4_experts.checkpoint_stacks(model_name, token)
+            if nf4_stacks:
+                loading = _stacked(loading, _nf4_experts.without_stacks())
         model_config = AutoConfig.from_pretrained(model_name, **hub)
         attention_auto, attention_why = choose_attention(model_config)
         if attn_implementation is None:
@@ -371,6 +390,9 @@ class MeepLanguageModel:
                 model_name, dtype=dtype, attn_implementation=attention, quantization_config=quantization,
                 device_map=device_map, **hub, **kwargs,
             )
+        nf4_experts = None
+        if nf4_stacks is not None:
+            nf4_experts = _nf4_experts.load(model, model_name, nf4_stacks, dtype, double_quant)
         tokenizer = load_tokenizer(model_name, **hub)
         if liger:
             _liger.prepare(model, loss_chunk_budget)
@@ -380,7 +402,7 @@ class MeepLanguageModel:
         if padding_free and has_linear_attention(model.config):
             _linear_attention.patch(model)
         model._meepsquared = {"padding_free": padding_free, "padding_free_reason": refusal, "liger": liger,
-                         "split": _split.apply(model), "fp8": load_in_fp8,
+                         "split": _split.apply(model), "fp8": load_in_fp8, "nf4_experts": nf4_experts,
                          "attention_auto": (attention_auto, attention_why)}
         model._meepsquared["allocator_cap"] = allocator_cap
         if shared_vllm is not None:
@@ -404,7 +426,9 @@ class MeepLanguageModel:
         dtype_name = str(dtype).removeprefix("torch.")
         _banner.show(model_type=model.config.model_type, liger=liger, padding_free=padding_free,
                      padding_free_reason=refusal,
-                     weights=(f"4-bit NF4 computing in {dtype_name}" if load_in_4bit
+                     weights=(f"4-bit NF4 computing in {dtype_name}"
+                              + (f", {nf4_experts['stacks']} expert stacks NF4 too" if nf4_experts else "")
+                              if load_in_4bit
                               else f"FP8 e4m3 frozen weights computing in {dtype_name}" if load_in_fp8 else dtype_name))
         return model, tokenizer
 
@@ -462,6 +486,9 @@ class MeepLanguageModel:
 
         if getattr(model, "_meepsquared", None) is None:
             raise TypeError("get_peft_model takes a model loaded with meepsquared's from_pretrained")
+        if kwargs.get("target_parameters") and model._meepsquared.get("nf4_experts"):
+            raise ValueError("target_parameters: LoRA on the expert stacks needs them as parameters, and this model "
+                             "holds them as NF4; load it with experts_4bit=False")
         torch.manual_seed(random_state)
         config = LoraConfig(r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, bias=bias,
                             target_modules=language_model_targets(

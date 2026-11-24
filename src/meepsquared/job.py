@@ -1196,8 +1196,9 @@ class TrainingJob:
         loading = [Decision("loading", "loading", "shard_by_shard" if shared else "whole",
                             f"shard by shard to GPU {local_rank}" if shared else f"to GPU {local_rank}",
                             "the GPU shares the system's memory" if shared else "")]
+        # LoRA on the expert stacks needs them as parameters, so with it they stay in 16 bits under QLoRA
         kwargs = {"max_seq_length": max_length, "load_in_4bit": self.method == "qlora",
-                  "load_in_fp8": self.method == "fp8"}
+                  "load_in_fp8": self.method == "fp8", "experts_4bit": not self.recipe.experts}
         if overrides.attention is not None:
             kwargs["attn_implementation"] = overrides.attention
         if overrides.liger is not None:

@@ -163,6 +163,7 @@ Returns `(model, tokenizer)`.
 | `loss_chunk_budget` | `32` | The chunk size factor of Liger's fused loss (`chunk_mem_const`). Applies to every model in the process.
 | `device_map` | the process's GPU | `"balanced"` or `"auto"` spread the layers over the GPUs; `"cpu"` for FSDP2. Otherwise GPU `LOCAL_RANK` under `torchrun`, else GPU 0.
 | `quant_storage` | `None` | The dtype the 4-bit weights are packed in; `torch.bfloat16` under FSDP2.
+| `experts_4bit` | `True` | With `load_in_4bit`, the expert stacks of a mixture of experts held as NF4 too; bitsandbytes alone leaves them in 16 bits. `False` keeps them in 16 bits, as LoRA on the stacks (`target_parameters`) needs. See xref:mixture-of-experts.adoc#_expert_stacks_in_nf4[Expert stacks in NF4].
 | `token`, `trust_remote_code` | `None`, `False` | Passed to Transformers.
 | `fast_inference` | `False` | `True` is refused; see xref:grpo.adoc[GRPO].
 | `gpu_memory_utilization`, `max_lora_rank` | | Accepted and not used: they configure only `fast_inference`.

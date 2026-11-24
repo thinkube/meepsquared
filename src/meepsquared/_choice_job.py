@@ -327,9 +327,12 @@ def prepare(job):
     dtype = model.get_input_embeddings().weight.dtype
     dtype_name = str(dtype).removeprefix("torch.")
     if job.method == "qlora":
+        nf4 = model._meepsquared.get("nf4_experts")
+        experts = (f"; its {nf4['stacks']} expert stacks NF4 too, {nf4['bytes'] / 2**30:.1f} GiB, each dequantized "
+                   "for its product" if nf4 else "")
         decisions.append(Decision("weights", "weights", job.method,
-                                  f"4-bit NF4 without double quantization, computing in {dtype_name}; the head in "
-                                  "float32", "the quantization the reference training used"))
+                                  f"4-bit NF4 without double quantization, computing in {dtype_name}{experts}; the "
+                                  "head in float32", "the quantization the reference training used"))
     else:
         decisions.append(Decision("weights", "weights", job.method, dtype_name,
                                   f"method {job.method}; the head in float32"))
