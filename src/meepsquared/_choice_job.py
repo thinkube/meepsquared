@@ -5,7 +5,7 @@
 meepsquared._choice).
 
 The plan reads the rows as preprocessed (encoded once, in a folder keyed by
-what made it), loads the model as an SFT job does, with "lora" or "qlora",
+what made it), loads the model as an SFT job does, with "lora", "qlora", "fp8" or "nvfp4",
 puts LoRA on the attention projections of the language model (its towers
 left out) and builds the head. Then it times training steps on the
 question the model reads the most tokens of, which also measures the peak
@@ -276,7 +276,8 @@ def _load(job, decisions: list):
         if overrides.attention is not None:
             raise ValueError("overrides.attention is a loading choice, and the model is loaded already")
         loaded_as = ("qlora" if getattr(model, "is_loaded_in_4bit", False)
-                     else "fp8" if model._meepsquared.get("fp8", False) else "lora")
+                     else "fp8" if model._meepsquared.get("fp8", False)
+                     else "nvfp4" if model._meepsquared.get("nvfp4", False) else "lora")
         if loaded_as != job.method:
             raise ValueError(f"method={job.method!r}, and the model was loaded for {loaded_as!r}")
         decisions.append(Decision("loading", "loading", "given", "the model as given, loaded by the caller"))
@@ -286,7 +287,8 @@ def _load(job, decisions: list):
     attention = overrides.attention if overrides.attention is not None else ATTENTION
     four_bit = {"dtype": QLORA_DTYPE, "double_quant": QLORA_DOUBLE_QUANT} if job.method == "qlora" else {}
     model, _ = MeepLanguageModel.from_pretrained(job.model, load_in_4bit=job.method == "qlora",
-                                                 load_in_fp8=job.method == "fp8", liger=False,
+                                                 load_in_fp8=job.method == "fp8",
+                                                 load_in_nvfp4=job.method == "nvfp4", liger=False,
                                                  attn_implementation=attention, **four_bit)
     device = next(model.parameters()).device
     decisions.append(Decision("loading", "loading", "whole", f"to {device}", "as an SFT job loads it, without Liger: "
@@ -341,6 +343,13 @@ def prepare(job):
                                   f"products on the FP8 tensor cores, computing in {dtype_name}; the head in float32",
                                   "method fp8 (see meepsquared._fp8); the adapters, embeddings, norms and routers stay "
                                   f"in {dtype_name}"))
+    elif job.method == "nvfp4":
+        decisions.append(Decision("weights", "weights", job.method,
+                                  f"the frozen linear layers of the decoder and their inputs in NVFP4 (Transformer "
+                                  f"Engine), their products on the FP4 tensor cores, computing in {dtype_name}; the "
+                                  "head in float32",
+                                  "method nvfp4 (see meepsquared._nvfp4); the adapters, embeddings, norms and routers "
+                                  f"stay in {dtype_name}"))
     else:
         decisions.append(Decision("weights", "weights", job.method, dtype_name,
                                   f"method {job.method}; the head in float32"))

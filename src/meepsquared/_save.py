@@ -38,10 +38,11 @@ _INDEX = "model.safetensors.index.json"
 
 
 def _dequantized(layer) -> Optional[torch.Tensor]:
-    """The dense weight of a bitsandbytes 4-bit or an FP8 linear layer, or None for another layer."""
+    """The dense weight of a bitsandbytes 4-bit, an FP8 or an NVFP4 linear layer, or None for another layer."""
     from meepsquared._fp8 import Fp8Linear
+    from meepsquared._nvfp4 import Nvfp4Linear
 
-    if isinstance(layer, Fp8Linear):
+    if isinstance(layer, (Fp8Linear, Nvfp4Linear)):
         return layer.dequantized()
     try:
         import bitsandbytes as bnb

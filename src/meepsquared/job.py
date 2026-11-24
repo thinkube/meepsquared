@@ -11,7 +11,7 @@
     result.save("out")    # the adapter; merged=True for a 16-bit model
 
 A job names the model, the data, the task ("sft" or "grpo") and the method
-("lora", "qlora" or "fp8"). Everything else is decided when the job is
+("lora", "qlora", "fp8" or "nvfp4"). Everything else is decided when the job is
 planned: the model is loaded with MeepLanguageModel.from_pretrained, LoRA is
 added with get_peft_model, the memory is measured on the real batch shape, and
 TRL's trainer is built as train() runs it. A Recipe sets the training choices
@@ -35,13 +35,14 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 TASKS = ("sft", "grpo", "tagging", "choice")
-METHODS = ("lora", "qlora", "fp8", "bottleneck")
-METHOD_NAMES = {"lora": "LoRA", "qlora": "QLoRA", "fp8": "LoRA on FP8 weights", "bottleneck": "bottleneck adapters"}
+METHODS = ("lora", "qlora", "fp8", "nvfp4", "bottleneck")
+METHOD_NAMES = {"lora": "LoRA", "qlora": "QLoRA", "fp8": "LoRA on FP8 weights", "nvfp4": "LoRA on NVFP4 weights",
+                "bottleneck": "bottleneck adapters"}
 # The methods of a tagging job (see meepsquared._tagging_job)
 TAGGING_METHODS = ("lora", "bottleneck")
 SCHEDULES = ("constant", "cosine", "linear", "ramped_linear")
 # The methods of a choice job (see meepsquared._choice_job)
-CHOICE_METHODS = ("lora", "qlora", "fp8")
+CHOICE_METHODS = ("lora", "qlora", "fp8", "nvfp4")
 # The Recipe fields of a choice job alone
 CHOICE_RECIPE = ("choice_head", "head_learning_rate", "candidates_per_pass", "head_only")
 # The Recipe fields a choice job refuses
@@ -698,7 +699,7 @@ class TrainingJob:
     data: a Hugging Face dataset id, a local .jsonl, .json or .parquet file,
         or a datasets.Dataset, holding conversations ("messages"), prompt and
         completion pairs, or plain text ("text"); for GRPO, prompts.
-    task: "sft" or "grpo". method: "lora", "qlora" (4-bit weights) or "fp8".
+    task: "sft" or "grpo". method: "lora", "qlora" (4-bit weights), "fp8" or "nvfp4" (Blackwell's FP4).
     steps or epochs: how long; one epoch when neither is given.
     rewards: GRPO's reward functions, as TRL takes them, or their names as
         'module:function' or 'file.py:function'.
@@ -865,9 +866,9 @@ class TrainingJob:
             if self.milestone_eval is None:
                 raise ValueError("overrides.milestone_engine answers the milestones' evaluation; give milestones and "
                                  "milestone_eval")
-            if self.method == "qlora":
+            if self.method in ("qlora", "nvfp4"):
                 raise ValueError("overrides.milestone_engine='vllm' shares 16-bit or FP8 expert stacks; method "
-                                 "'qlora' holds them in 4 bits")
+                                 f"{self.method!r} holds its weights in 4 bits")
         if self.report_to is not None and not (
                 isinstance(self.report_to, str)
                 or (isinstance(self.report_to, (list, tuple)) and all(isinstance(r, str) for r in self.report_to))):
@@ -1181,7 +1182,8 @@ class TrainingJob:
                                  "loaded already; load it with them set")
             four_bit = bool(getattr(model, "is_loaded_in_4bit", False))
             fp8 = bool(model._meepsquared.get("fp8", False))
-            loaded_as = "qlora" if four_bit else "fp8" if fp8 else "lora"
+            nvfp4 = bool(model._meepsquared.get("nvfp4", False))
+            loaded_as = "qlora" if four_bit else "fp8" if fp8 else "nvfp4" if nvfp4 else "lora"
             if loaded_as != self.method:
                 raise ValueError(f"method={self.method!r}, and the model was loaded for {loaded_as!r}")
             model.max_seq_length = max_length
@@ -1198,7 +1200,8 @@ class TrainingJob:
                             "the GPU shares the system's memory" if shared else "")]
         # LoRA on the expert stacks needs them as parameters, so with it they stay in 16 bits under QLoRA
         kwargs = {"max_seq_length": max_length, "load_in_4bit": self.method == "qlora",
-                  "load_in_fp8": self.method == "fp8", "experts_4bit": not self.recipe.experts}
+                  "load_in_fp8": self.method == "fp8", "load_in_nvfp4": self.method == "nvfp4",
+                  "experts_4bit": not self.recipe.experts}
         if overrides.attention is not None:
             kwargs["attn_implementation"] = overrides.attention
         if overrides.liger is not None:
@@ -1255,9 +1258,9 @@ class TrainingJob:
         if version < VLLM_TRL:
             raise ValueError(f"overrides.vllm=True needs TRL {VLLM_TRL[0]}.{VLLM_TRL[1]} or later, and TRL "
                              f"{trl.__version__} is installed")
-        if self.method == "fp8":
-            raise ValueError("overrides.vllm=True with method='fp8': meepsquared does not send weights held as FP8 to "
-                             "vLLM; use method 'lora' or 'qlora'")
+        if self.method in ("fp8", "nvfp4"):
+            raise ValueError(f"overrides.vllm=True with method={self.method!r}: meepsquared does not send weights held "
+                             "as FP8 or NVFP4 to vLLM; use method 'lora' or 'qlora'")
         if importlib.util.find_spec("vllm") is None:
             raise ValueError("overrides.vllm=True, and vLLM is not installed; "
                              "https://thinkube.org/meepsquared/grpo.html says which vLLM matches your PyTorch")
@@ -1469,7 +1472,8 @@ class TrainingJob:
         dtype_name = str(base_dtype).removeprefix("torch.")
         device = next(model.parameters()).device
         weights = {"lora": f"{dtype_name}", "qlora": f"4-bit NF4, computing in {dtype_name}",
-                   "fp8": f"FP8 e4m3, computing in {dtype_name}"}[self.method]
+                   "fp8": f"FP8 e4m3, computing in {dtype_name}",
+                   "nvfp4": f"NVFP4 weights and inputs (Transformer Engine), computing in {dtype_name}"}[self.method]
         decisions.append(Decision("weights", "weights", self.method, weights, f"method {self.method}"))
 
         # Counted before LoRA; a 4-bit weight packs two parameters in a byte, and its quant_state has its shape
