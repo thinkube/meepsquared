@@ -47,6 +47,20 @@ meepsquared plan for meta-llama/Llama-3.1-8B-Instruct, LoRA, on NVIDIA GB10 (122
   allocator    expandable segments
 ```
 
+A plan keeps what it measured, with what each measurement depends on.
+`job.plan(reuse=earlier_plan, reused_from="...")` makes the plan of a changed
+job from an earlier plan's measurements, without loading the model, when
+nothing they depend on changed; otherwise it raises `MeasureAgain`, saying
+what changed, and `job.plan()` measures. A choice plan reuses the time of a
+step, the memory and a milestone's time across any change but the model, the
+method, the attention, the LoRA rank and targets, the head and the candidates
+per pass, as long as the data's longest question reads no more tokens than the
+one measured: a step's time is priced on the measured line at the new data's
+mean question. An SFT plan reuses its measurements only when the job differs in
+where its milestones are. The plan's line `measurements` says what it reused
+and from which plan, or that it measured. The caller vouches that the job runs
+on the GPU of the earlier plan (its `device`).
+
 ### What the user gives
 
 | Field | Meaning | Default |

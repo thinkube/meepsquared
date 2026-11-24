@@ -518,6 +518,23 @@ def _decide(name: str, label: str, given, auto, describe: Callable[[Any], str], 
     return Decision(name, label, given, describe(given), user_reason, "user", auto, auto_text)
 
 
+class MeasureAgain(ValueError):
+    """An earlier plan's measurements do not hold for this job; the message says what changed. Plan the job without
+    reuse, which measures."""
+
+
+# The format of the measurements an SFT plan keeps; raised when what they hold changes
+SFT_MEASUREMENTS = 1
+
+
+def _reused_decision(found: dict, reused_from: str, what: str, why: str) -> "Decision":
+    """The plan's line "measurements" for measurements taken from an earlier plan: where they were measured (the
+    plan that measured them, when they came through others) and what was reused."""
+    where = found.get("from") or reused_from or "an earlier plan"
+    return Decision("measurements", "measurements", {"from": where},
+                    f"reused from {where}, measured on {found['device']}: {what}; nothing measured or loaded", why)
+
+
 @dataclass
 class Plan:
     """What a job will do on this machine, and why: str() is the readable plan, to_dict() the same as data."""
@@ -533,9 +550,9 @@ class Plan:
     peak_gpu_bytes: Optional[int] = None
     peak_host_bytes: Optional[int] = None
     memory_request_bytes: Optional[int] = None
-    # What with_milestones needs to place the milestones again without measuring anything: the time per step, the
-    # estimate without the milestones, the planned and the first steps, one milestone's time, and what one does
-    revision_basis: Optional[dict] = None
+    # What the plan measured, with what each measurement depends on, for a later plan of a changed job to reuse
+    # (TrainingJob.plan(reuse=...)); None for a plan that keeps none
+    measurements: Optional[dict] = None
 
     def __getitem__(self, name: str) -> Decision:
         for decision in self.decisions:
@@ -555,64 +572,13 @@ class Plan:
                 "free_bytes": self.free_bytes, "decisions": [d.to_dict() for d in self.decisions],
                 "seconds_per_step": self.seconds_per_step, "estimated_seconds": self.estimated_seconds,
                 "peak_gpu_bytes": self.peak_gpu_bytes, "peak_host_bytes": self.peak_host_bytes,
-                "memory_request_bytes": self.memory_request_bytes, "revision_basis": self.revision_basis}
+                "memory_request_bytes": self.memory_request_bytes, "measurements": self.measurements}
 
     @classmethod
     def from_dict(cls, data: dict) -> "Plan":
         """A plan as to_dict() wrote it."""
         fields = {k: v for k, v in data.items() if k != "decisions"}
         return cls(decisions=[Decision(**d) for d in data["decisions"]], **fields)
-
-    def with_milestones(self, milestones: Optional[float], growth: Optional[float], made: str = "") -> "Plan":
-        """This plan with the milestones placed again (milestones and growth as TrainingJob takes them) and nothing
-        measured again: the time per step, the memory and one milestone's time are this plan's, which measured
-        them; the milestones' steps, the estimate and the time line are worked out again. For a job that differs
-        from this plan's only in where its milestones are. made: when this plan was made, for the decision that
-        says it was revised."""
-        from meepsquared import _milestones, _sessions
-
-        basis = self.revision_basis
-        if basis is None:
-            raise ValueError("this plan keeps no revision basis (it was made before plans could be revised, or it "
-                             "measured nothing): plan the job again")
-        if growth is not None and milestones is None:
-            raise ValueError("milestone_growth: no milestones; give milestones, the share of the planned steps "
-                             "before the first milestone")
-        if milestones is not None and not basis["milestones_what"]:
-            raise ValueError("this plan placed no milestones, so it measured none: plan the job again")
-        planned, start = basis["planned_steps"], basis["start_step"]
-        each = basis["milestone_seconds"]
-        decisions = [d for d in self.decisions if d.name not in ("milestones", "duration", "revised")]
-        estimated = basis["estimated_without_milestones"]
-        at = []
-        if milestones is None:
-            decisions.append(Decision("milestones", "milestones", None, "none", "no milestones given"))
-        else:
-            at = [s for s in _milestones.steps(planned, milestones, growth) if s > start]
-            what = basis["milestones_what"]
-            decisions.append(Decision(
-                "milestones", "milestones", {"steps": at, basis["milestone_value_key"]: each},
-                f"{len(at)} at steps {_steps_text(at, growth is not None)}: {what}",
-                _milestones.spacing_text(planned, milestones, growth) + basis["milestones_why"]))
-        milestone_seconds = each * len(at) if each is not None else 0.0
-        if self.seconds_per_step is not None and estimated is not None:
-            estimated += milestone_seconds
-            line = _sessions.time_line(self.seconds_per_step, estimated, planned - start, basis["evaluations"],
-                                       basis["eval_seconds"], len(at), milestone_seconds,
-                                       basis["evaluations_counted"])
-        else:
-            estimated, line = None, "not timed"
-        old = self["duration"]
-        decisions.append(Decision("duration", "time", self.seconds_per_step, line, old.reason))
-        decisions.append(Decision("revised", "revised", made or None,
-                                  f"from the plan{f' of {made}' if made else ''}, with only the milestones placed "
-                                  "again", "the time per step, the memory and one milestone's time are that plan's, "
-                                  "measured then; nothing was measured again"))
-        return Plan(model=self.model, task=self.task, method=self.method, device=self.device,
-                    free_bytes=self.free_bytes, decisions=_ordered(decisions), seconds_per_step=self.seconds_per_step,
-                    estimated_seconds=estimated, peak_gpu_bytes=self.peak_gpu_bytes,
-                    peak_host_bytes=self.peak_host_bytes, memory_request_bytes=self.memory_request_bytes,
-                    revision_basis=basis)
 
 
 @dataclass
@@ -1096,9 +1062,96 @@ class TrainingJob:
 
     # Planning and training
 
-    def plan(self) -> Plan:
-        """Load the model, add LoRA, measure, and build TRL's trainer as train() runs it; returns the plan."""
-        return self._prepare().plan
+    def plan(self, reuse=None, reused_from: str = "", measured_because: str = "") -> Plan:
+        """Load the model, add LoRA, measure, and build TRL's trainer as train() runs it; returns the plan.
+
+        reuse: an earlier plan (a Plan, or its to_dict()) whose measurements this plan takes instead of measuring,
+        without loading the model, when nothing they depend on changed; MeasureAgain says what did. A choice plan
+        reuses the time of a step, the memory and a milestone's time across any change of what they do not depend on
+        (see meepsquared._choice_job.reuse); an SFT plan reuses them only when the job differs in where its
+        milestones are. The caller vouches that the job runs on the GPU the measurements were made on (the earlier
+        plan's device): the plan cannot see it without loading. reused_from names the earlier plan for the plan's
+        line "measurements". measured_because: why this plan measures, for that line, when the caller tried a reuse
+        and was told to measure again."""
+        if reuse is not None:
+            if self._first is not None:
+                raise ValueError("a resumed training keeps its first session's plan; give no reuse")
+            earlier = reuse if isinstance(reuse, Plan) else Plan.from_dict(reuse)
+            if earlier.measurements is None:
+                raise MeasureAgain("the earlier plan keeps no measurements")
+            if earlier.task != self.task:
+                raise MeasureAgain(f"the earlier plan is of task {earlier.task}, and this job's is {self.task}")
+            if self.task == "choice":
+                from meepsquared import _choice_job
+
+                return _choice_job.reuse(self, earlier, reused_from)
+            if self.task == "sft":
+                return self._reuse_sft(earlier, reused_from)
+            raise MeasureAgain(f"a {self.task} plan reuses no measurements")
+        plan = self._prepare().plan
+        if plan.measurements is not None and not any(d.name == "measurements" for d in plan.decisions):
+            plan.decisions = _ordered(plan.decisions + [Decision(
+                "measurements", "measurements", None, f"measured on {plan.device}",
+                measured_because or "no earlier plan given to reuse")])
+        return plan
+
+    def _written(self) -> bool:
+        """Whether the job can be written as data (to_dict), so that a later plan can compare it with its own."""
+        return (isinstance(self.model, str) and self.tokenizer is None and (self.data is None or _files(self.data))
+                and (self.eval_data is None or _files(self.eval_data))
+                and (self.milestone_eval is None or isinstance(self.milestone_eval, (str, os.PathLike))))
+
+    def _placement_free(self) -> dict:
+        """The job as data without where its milestones are."""
+        return {k: v for k, v in self.to_dict().items() if k not in ("milestones", "milestone_growth")}
+
+    def _reuse_sft(self, earlier: Plan, reused_from: str) -> Plan:
+        """The earlier SFT plan with the milestones placed again for this job, which differs from its job only in
+        where its milestones are; nothing measured or loaded."""
+        from meepsquared import _milestones, _sessions
+
+        found = earlier.measurements
+        if found.get("format") != SFT_MEASUREMENTS:
+            raise MeasureAgain(f"the earlier plan's measurements are of format {found.get('format')}, and this "
+                               f"Meep² reads {SFT_MEASUREMENTS}")
+        if not self._written():
+            raise MeasureAgain("the job holds loaded objects, which cannot be compared with the earlier plan's job")
+        mine = self._placement_free()
+        changed = sorted(k for k in set(mine) | set(found["job"]) if mine.get(k) != found["job"].get(k))
+        if changed:
+            raise MeasureAgain(f"an SFT plan lays out and measures its batches; it reuses them only when the job "
+                               f"differs in where its milestones are, and {', '.join(changed)} changed")
+        basis = found["placement"]
+        if self.milestones is not None and not basis["milestones_what"]:
+            raise MeasureAgain("the earlier plan placed no milestones, so it measured none")
+        planned, start, each = basis["planned_steps"], basis["start_step"], basis["milestone_seconds"]
+        decisions = [d for d in earlier.decisions if d.name not in ("milestones", "duration", "measurements")]
+        at = []
+        if self.milestones is None:
+            decisions.append(Decision("milestones", "milestones", None, "none", "no milestones given"))
+        else:
+            at = [s for s in _milestones.steps(planned, self.milestones, self.milestone_growth) if s > start]
+            decisions.append(Decision(
+                "milestones", "milestones", {"steps": at, basis["milestone_value_key"]: each},
+                f"{len(at)} at steps {_steps_text(at, self.milestone_growth is not None)}: {basis['milestones_what']}",
+                _milestones.spacing_text(planned, self.milestones, self.milestone_growth) + basis["milestones_why"]))
+        estimated = basis["estimated_without_milestones"]
+        milestone_seconds = each * len(at) if each is not None else 0.0
+        if earlier.seconds_per_step is not None and estimated is not None:
+            estimated += milestone_seconds
+            line = _sessions.time_line(earlier.seconds_per_step, estimated, planned - start, basis["evaluations"],
+                                       basis["eval_seconds"], len(at), milestone_seconds, basis["evaluations_counted"])
+        else:
+            estimated, line = None, "not timed"
+        decisions.append(Decision("duration", "time", earlier.seconds_per_step, line, earlier["duration"].reason))
+        decisions.append(_reused_decision(found, reused_from, "the batches, the time of a step, the memory and a "
+                                          "milestone's time", "only the milestones' steps changed"))
+        carried = {**found, "from": found.get("from") or reused_from}
+        return Plan(model=earlier.model, task=earlier.task, method=earlier.method, device=earlier.device,
+                    free_bytes=earlier.free_bytes, decisions=_ordered(decisions),
+                    seconds_per_step=earlier.seconds_per_step, estimated_seconds=estimated,
+                    peak_gpu_bytes=earlier.peak_gpu_bytes, peak_host_bytes=earlier.peak_host_bytes,
+                    memory_request_bytes=earlier.memory_request_bytes, measurements=carried)
 
     def trainer(self):
         """TRL's SFTTrainer or GRPOTrainer, set up as train() would run it, not trained."""
@@ -2200,7 +2253,7 @@ class TrainingJob:
             duration = _sessions.time_line(seconds_per_step, estimated, planned, evaluations or 0, eval_seconds,
                                            len(milestone_at or []), milestone_seconds)
         decisions.append(Decision("duration", "time", seconds_per_step, duration, time_why))
-        revision_basis = {
+        placement = {
             "planned_steps": planned, "start_step": 0,
             "estimated_without_milestones": (estimated - milestone_seconds) if estimated is not None else None,
             "milestone_seconds": each if self.milestones is not None else None,
@@ -2243,7 +2296,9 @@ class TrainingJob:
                     task=self.task, method=self.method, device=device_name, free_bytes=free_bytes,
                     decisions=_ordered(decisions), seconds_per_step=seconds_per_step, estimated_seconds=estimated,
                     peak_gpu_bytes=peak_gpu, peak_host_bytes=peak_host, memory_request_bytes=request,
-                    revision_basis=revision_basis if first is None else None)
+                    measurements=({"task": "sft", "format": SFT_MEASUREMENTS, "job": self._placement_free(),
+                                   "placement": placement, "device": device_name}
+                                  if first is None and self._written() else None))
         self._prepared = _Prepared(peft_model, tokenizer, trainer, plan, output, milestones=milestone_at,
                                    milestone_rows=milestone_rows, milestone_scorer=milestone_scorer)
         return self._prepared
@@ -2261,7 +2316,8 @@ ORDER = ["loading", "allocator_cap", "weights", "attention", "padding_free", "li
          "micro_batch",
          "accumulation", "order", "rank",
          "alpha", "dropout", "targets", "experts", "optimizer", "learning_rate", "schedule", "warmup_steps",
-         "max_grad_norm", "weight_decay", "length", "duration", "memory", "evaluation", "milestones", "milestone_weights", "milestone_engine", "revised",
+         "max_grad_norm", "weight_decay", "length", "duration", "memory", "measurements", "evaluation", "milestones",
+         "milestone_weights", "milestone_engine",
          "data_checks",
          "source_weights", "max_length", "answers_only", "labels", "words", "bottleneck", "head_dropout", "keep",
          "decode", "choice_head", "set_layers", "none_output", "candidates_per_pass", "head_learning_rate", "head_only", "start_from",

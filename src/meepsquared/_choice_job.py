@@ -75,6 +75,12 @@ QLORA_DOUBLE_QUANT = False
 # The seed of the head's initial weights (Transformers' default seed)
 SEED = 42
 REFERENCE = "the setting of the reference choice training on Gemma 4 E4B"
+# The format of the measurements a choice plan keeps for a later plan to reuse (measured_key): raised when what the
+# time of a step or the memory depends on changes in Meep², so that measurements of other code are not reused
+MEASUREMENTS = 1
+# The lines of the plan that need the model loaded, which a plan reusing measurements takes from the plan that
+# measured them: what they depend on is in the measurements' key
+MODEL_DECISIONS = ("loading", "allocator_cap", "weights")
 
 
 def ramp(step: int, warmup: int, total: int) -> float:
@@ -352,11 +358,79 @@ def _answering_chooser(job, method: str, attention: str, rank: int, alpha: int, 
     return answering.eval()
 
 
-def prepare(job):
-    """A choice job's plan and trainer (see the module's docstring); returns the job's _Prepared."""
+def measured_key(job) -> dict:
+    """What the time of a step and the memory depend on, besides the GPU and the data's longest question: a later
+    plan reuses them only when its job gives the same."""
+    recipe = job.recipe
+    kind = recipe.choice_head if recipe.choice_head is not None else HEAD
+    return {"format": MEASUREMENTS,
+            "model": job.model if isinstance(job.model, str) else str(job.model.config._name_or_path),
+            "method": job.method, "attention": attention_of(job),
+            "rank": recipe.rank if recipe.rank is not None else RANK,
+            "targets": list(recipe.targets if recipe.targets is not None else TARGETS), "head": kind,
+            "set_layers": ((recipe.set_layers if recipe.set_layers is not None else SET_LAYERS) if kind == "set"
+                           else None),
+            "none_output": recipe.none_output if recipe.none_output is not None else NONE_OUTPUT,
+            "candidates_per_pass": (recipe.candidates_per_pass if recipe.candidates_per_pass is not None
+                                    else CANDIDATES_PER_PASS)}
+
+
+KEY_NAMES = {"format": "Meep²'s measurement format", "model": "the model", "method": "the method",
+             "attention": "the attention", "rank": "the LoRA rank", "targets": "the LoRA targets", "head": "the head",
+             "set_layers": "the set layers", "none_output": "the none output",
+             "candidates_per_pass": "the candidates per pass"}
+
+
+def reuse(job, earlier, reused_from: str = ""):
+    """The plan of `job` with the measurements of the earlier plan, without loading the model or measuring (see
+    TrainingJob.plan). MeasureAgain when they do not hold: what they depend on changed (measured_key); the data's
+    longest question reads more tokens than the one measured, whose memory bounds the job's; or the job answers
+    milestone rows with weights the earlier plan timed none with."""
+    from meepsquared.job import MeasureAgain
+
+    found = earlier.measurements
+    key = measured_key(job)
+    changed = [KEY_NAMES[k] for k in key if key[k] != found["key"].get(k)]
+    if changed:
+        raise MeasureAgain(f"{', '.join(changed)} changed, which the time of a step and the memory depend on")
+    return prepare(job, found, reused_from).plan
+
+
+def _weights_decision(job, model):
+    from meepsquared.job import Decision
+
+    dtype_name = str(model.get_input_embeddings().weight.dtype).removeprefix("torch.")
+    if job.method == "qlora":
+        nf4 = model._meepsquared.get("nf4_experts")
+        experts = (f"; its {nf4['stacks']} expert stacks NF4 too, {nf4['bytes'] / 2**30:.1f} GiB, each dequantized "
+                   "for its product" if nf4 else "")
+        return Decision("weights", "weights", job.method,
+                        f"4-bit NF4 without double quantization, computing in {dtype_name}{experts}; the head in "
+                        "float32", "the quantization the reference training used")
+    if job.method == "fp8":
+        return Decision("weights", "weights", job.method,
+                        f"the frozen linear layers of the decoder in FP8 (e4m3, one scale per tensor), their products "
+                        f"on the FP8 tensor cores, computing in {dtype_name}; the head in float32",
+                        "method fp8 (see meepsquared._fp8); the adapters, embeddings, norms and routers stay in "
+                        f"{dtype_name}")
+    if job.method == "nvfp4":
+        return Decision("weights", "weights", job.method,
+                        f"the frozen linear layers of the decoder and their inputs in NVFP4 (Transformer Engine), "
+                        f"their products on the FP4 tensor cores, computing in {dtype_name}; the head in float32",
+                        "method nvfp4 (see meepsquared._nvfp4); the adapters, embeddings, norms and routers stay in "
+                        f"{dtype_name}")
+    return Decision("weights", "weights", job.method, dtype_name, f"method {job.method}; the head in float32")
+
+
+def prepare(job, reusing: dict = None, reused_from: str = ""):
+    """A choice job's plan and trainer (see the module's docstring); returns the job's _Prepared.
+
+    reusing: the measurements of an earlier plan whose key is this job's (see reuse). The plan is then made without
+    the model, which is not loaded: the lines that need it are the measuring plan's, the times and the memory are its
+    measurements, and the rest is decided as with the model. The _Prepared holds no model and no trainer."""
     from meepsquared import _allocator, _sessions
-    from meepsquared.job import (EVALUATIONS, PREPROCESSED, RESUMED, TIMED_STEPS, Decision, Plan, _decide, _gib,
-                                 _ordered, _Prepared, _say, _steps_text)
+    from meepsquared.job import (EVALUATIONS, PREPROCESSED, RESUMED, TIMED_STEPS, Decision, MeasureAgain, Plan,
+                                 _decide, _gib, _ordered, _Prepared, _reused_decision, _say, _steps_text)
     from meepsquared.models import MeepLanguageModel, load_tokenizer
 
     recipe, overrides = job.recipe, job.overrides
@@ -381,65 +455,60 @@ def prepare(job):
             if missing is not None:
                 raise ValueError(f"{where} row {missing}: 'none' is required with the head's none output: the index "
                                  "of the candidate that says no candidate applies")
+    sizes = [_choice.tokens_read(r) for r in rows]
+    if reusing is not None and max(sizes) > reusing["steps"]["largest_tokens"]:
+        raise MeasureAgain(f"the data's longest question reads {max(sizes):,} tokens, more than the "
+                           f"{reusing['steps']['largest_tokens']:,} of the one measured, whose memory bounds the job's")
 
     # The model, the adapter and the head
-    model = _load(job, decisions)
-    dtype = model.get_input_embeddings().weight.dtype
-    dtype_name = str(dtype).removeprefix("torch.")
-    if job.method == "qlora":
-        nf4 = model._meepsquared.get("nf4_experts")
-        experts = (f"; its {nf4['stacks']} expert stacks NF4 too, {nf4['bytes'] / 2**30:.1f} GiB, each dequantized "
-                   "for its product" if nf4 else "")
-        decisions.append(Decision("weights", "weights", job.method,
-                                  f"4-bit NF4 without double quantization, computing in {dtype_name}{experts}; the "
-                                  "head in float32", "the quantization the reference training used"))
-    elif job.method == "fp8":
-        decisions.append(Decision("weights", "weights", job.method,
-                                  f"the frozen linear layers of the decoder in FP8 (e4m3, one scale per tensor), their "
-                                  f"products on the FP8 tensor cores, computing in {dtype_name}; the head in float32",
-                                  "method fp8 (see meepsquared._fp8); the adapters, embeddings, norms and routers stay "
-                                  f"in {dtype_name}"))
-    elif job.method == "nvfp4":
-        decisions.append(Decision("weights", "weights", job.method,
-                                  f"the frozen linear layers of the decoder and their inputs in NVFP4 (Transformer "
-                                  f"Engine), their products on the FP4 tensor cores, computing in {dtype_name}; the "
-                                  "head in float32",
-                                  "method nvfp4 (see meepsquared._nvfp4); the adapters, embeddings, norms and routers "
-                                  f"stay in {dtype_name}"))
-    else:
-        decisions.append(Decision("weights", "weights", job.method, dtype_name,
-                                  f"method {job.method}; the head in float32"))
     rank = recipe.rank if recipe.rank is not None else RANK
     alpha = recipe.alpha if recipe.alpha is not None else ALPHA
     dropout = recipe.dropout if recipe.dropout is not None else DROPOUT
     names = recipe.targets if recipe.targets is not None else TARGETS
-    targets = _language_model_targets(model, names)
-    if not targets:
-        raise ValueError(f"no linear layer of the language model is named one of {names}")
-    for p in model.parameters():
-        p.requires_grad_(False)
-    peft = MeepLanguageModel.get_peft_model(model, r=rank, lora_alpha=alpha, lora_dropout=dropout,
-                                            target_modules=targets, use_gradient_checkpointing=False,
-                                            fused_lora=False, compile_layers=False)
-    decoder = peft.get_base_model().get_decoder()
-    device = next(decoder.parameters()).device
     kind = recipe.choice_head if recipe.choice_head is not None else HEAD
     set_layers = recipe.set_layers if recipe.set_layers is not None else SET_LAYERS
     per_pass = recipe.candidates_per_pass if recipe.candidates_per_pass is not None else CANDIDATES_PER_PASS
-    torch.manual_seed(SEED)
-    head = _choice.build_head(decoder.config.hidden_size, kind, set_layers, none_output).to(device)
-    chooser = _choice.Chooser(peft, decoder, head, kind, per_pass, tokenizer.pad_token_id)
-    model_name = job.model if isinstance(job.model, str) else str(model.config._name_or_path)
+    chooser = model = None
+    if reusing is None:
+        model = _load(job, decisions)
+        decisions.append(_weights_decision(job, model))
+        targets = _language_model_targets(model, names)
+        if not targets:
+            raise ValueError(f"no linear layer of the language model is named one of {names}")
+        for p in model.parameters():
+            p.requires_grad_(False)
+        peft = MeepLanguageModel.get_peft_model(model, r=rank, lora_alpha=alpha, lora_dropout=dropout,
+                                                target_modules=targets, use_gradient_checkpointing=False,
+                                                fused_lora=False, compile_layers=False)
+        decoder = peft.get_base_model().get_decoder()
+        device = next(decoder.parameters()).device
+        torch.manual_seed(SEED)
+        head = _choice.build_head(decoder.config.hidden_size, kind, set_layers, none_output).to(device)
+        chooser = _choice.Chooser(peft, decoder, head, kind, per_pass, tokenizer.pad_token_id)
+        model_name = job.model if isinstance(job.model, str) else str(model.config._name_or_path)
+        target_count, cuda = len(targets), device.type == "cuda"
+    else:
+        # Reusing measurements, the lines that need the model are the measuring plan's: what they depend on is in
+        # the measurements' key
+        decisions.extend(Decision(**d) for d in reusing["facts"]["decisions"])
+        if isinstance(job.model, str):
+            decisions.append(_decide("attention", "attention", overrides.attention, ATTENTION, str,
+                                     "the candidates are read after the shared cache, right-padded, with a mask"))
+        else:
+            decisions.append(Decision("attention", "attention", attention_of(job), attention_of(job),
+                                      "as the model was loaded"))
+        model_name, target_count, cuda = reusing["key"]["model"], reusing["facts"]["targets"], reusing["facts"]["cuda"]
     config = {"head": kind, "set_layers": set_layers, "none_output": none_output, "model": model_name,
               "method": job.method,
               "candidates_per_pass": per_pass}
-    chooser._meepsquared = {"choice": config}
+    if chooser is not None:
+        chooser._meepsquared = {"choice": config}
     decisions.append(_decide("rank", "LoRA rank", recipe.rank, RANK, str, REFERENCE))
     decisions.append(_decide("alpha", "LoRA alpha", recipe.alpha, ALPHA, str, REFERENCE))
     decisions.append(_decide("dropout", "LoRA dropout", recipe.dropout, DROPOUT, str, REFERENCE))
     decisions.append(_decide("targets", "targets", recipe.targets, TARGETS, ", ".join,
                              f"the attention's projections of the language model, its vision, audio and image "
-                             f"modules left out: {len(targets)} layers"))
+                             f"modules left out: {target_count} layers"))
     head_text = {"set": "the set head: a LayerNorm, a scalar score, and an attention over the question's candidates",
                  "scalar": "a LayerNorm and a scalar score of each candidate alone"}
     decisions.append(_decide("choice_head", "head", recipe.choice_head, HEAD, head_text.get,
@@ -466,7 +535,9 @@ def prepare(job):
     start, start_step = None, 0
     if job.start_from is not None:
         start = _choice.read_start(job.start_from)
-        _choice.check_start(chooser, start)
+        # Without the model the state's tensors are not checked against it here; the training checks them
+        if chooser is not None:
+            _choice.check_start(chooser, start)
         examples = start["examples"]
         if examples % effective:
             raise ValueError(f"start_from: {examples} questions are not whole optimizer steps of {effective}")
@@ -519,8 +590,7 @@ def prepare(job):
     decisions.append(Decision("length", "length", total, f"{length}: {questions:,} questions, {total} steps",
                               "as given" if job.steps or job.epochs else "one epoch, as no steps were given"))
 
-    # The trainer
-    cuda = device.type == "cuda"
+    # The trainer, built only with the model; its arguments are built either way, and say where it reports
     args = {"output_dir": output, "per_device_train_batch_size": 1, "per_device_eval_batch_size": 1,
             "gradient_accumulation_steps": effective, "max_steps": total, "learning_rate": rate,
             "weight_decay": weight_decay, "max_grad_norm": max_grad_norm, "optim": "adamw_torch", "logging_steps": 1,
@@ -534,16 +604,18 @@ def prepare(job):
         every = job.eval_every if job.eval_every is not None else every_auto
         args.update(eval_strategy="steps", eval_steps=every, prediction_loss_only=True)
     training_args = ChoiceArguments(**args)
-    # One process trains on its one GPU: the Trainer's DataParallel would split a question
-    if training_args.n_gpu > 1:
-        training_args._n_gpu = 1
     settings = {"rows": rows, "eval_rows": eval_rows, "head_only": head_only, "effective_batch": effective,
                 "learning_rate": rate, "head_learning_rate": head_rate, "weight_decay": weight_decay,
                 "warmup_steps": warmup, "config": config, "start": start, "start_step": start_step}
-    trainer = ChoiceTrainer(model=chooser, args=training_args, train_dataset=Questions(len(rows), questions),
-                            eval_dataset=(Questions(len(eval_rows), len(eval_rows), evaluation=True)
-                                          if eval_rows is not None else None),
-                            data_collator=one, processing_class=tokenizer, settings=settings)
+    trainer = None
+    if chooser is not None:
+        # One process trains on its one GPU: the Trainer's DataParallel would split a question
+        if training_args.n_gpu > 1:
+            training_args._n_gpu = 1
+        trainer = ChoiceTrainer(model=chooser, args=training_args, train_dataset=Questions(len(rows), questions),
+                                eval_dataset=(Questions(len(eval_rows), len(eval_rows), evaluation=True)
+                                              if eval_rows is not None else None),
+                                data_collator=one, processing_class=tokenizer, settings=settings)
     if eval_rows is not None:
         value = {"data": report["eval_source"], "rows": len(eval_rows), "every": every}
         evaluation_text = (f"{len(eval_rows):,} questions of {report['eval_source']}, every {every} steps, the loss "
@@ -560,17 +632,19 @@ def prepare(job):
                               f"{report['source']}: {report['decision']['text']}", f"preprocessed in {folder}"))
     decisions.append(Decision("output", "output", output, output,
                               "as given" if job.output is not None else "named after the model and the task"))
-    reported = list(trainer.args.report_to or [])
+    reported = list(training_args.report_to or [])
     decisions.append(Decision("report_to", "tracking", reported, ", ".join(reported) or "none",
                               "as given" if job.report_to is not None else "Transformers' default"))
     decisions.append(Decision("allocator", "allocator", _allocator.DECISION, _allocator.DECISION))
 
     # The milestones, and the weights that answer them
     answering = None
+    answering_method = job.milestone_weights if job.milestone_weights is not None else job.method
     if job.milestone_weights is not None and job.milestone_weights != job.method:
-        answering = (job.milestone_weights,
-                     _answering_chooser(job, job.milestone_weights, attention_of(job), rank, alpha, names, kind,
-                                        set_layers, none_output, per_pass, tokenizer.pad_token_id))
+        if reusing is None:
+            answering = (job.milestone_weights,
+                         _answering_chooser(job, job.milestone_weights, attention_of(job), rank, alpha, names, kind,
+                                            set_layers, none_output, per_pass, tokenizer.pad_token_id))
         decisions.append(Decision("milestone_weights", "milestone weights", job.milestone_weights,
                                   f"a second copy of the base loaded as {job.milestone_weights} answers the "
                                   "milestones' rows, the adapter and the head copied into it at each milestone",
@@ -587,19 +661,40 @@ def prepare(job):
                                                      right=True, none=none_output)
 
     # The time per step, and the memory, from steps timed on the question of the most tokens read and on the median
-    # one, each step priced on the line through the two at the mean question
+    # one, each step priced on the line through the two at the mean question; reusing measurements, the measured
+    # steps' times priced on the line at this data's mean question
     timed = job.timed_steps if job.timed_steps is not None else TIMED_STEPS
     seconds_per_step = estimated = timing = None
     milestone_each = None
     milestone_timing = ""
-    if timed == 0:
+    steps = milestone = memory = None
+    if reusing is not None:
+        steps = reusing["steps"]
+        per_question = _sessions.on_the_line(steps["median_tokens"], steps["median_seconds"], steps["largest_tokens"],
+                                             steps["largest_seconds"], statistics.mean(sizes))
+        seconds_per_step = per_question * effective
+        estimated = seconds_per_step * (total - start_step)
+        time_why = (f"{steps['how']}; each question priced on the line through the two at this data's mean, "
+                    f"{statistics.mean(sizes):,.0f} tokens, {effective} questions a step, the adapter training in "
+                    "each")
+        memory = reusing["memory"]
+        if milestone_rows is not None and milestone_at:
+            milestone = reusing.get("milestone")
+            if milestone is None or milestone["weights"] != answering_method:
+                raise MeasureAgain(f"the milestones' rows are answered by the {answering_method} weights, and the "
+                                   "earlier plan timed no milestone with them")
+            milestone_each = milestone["seconds_per_token"] * sum(map(_choice.tokens_read, milestone_rows))
+            milestone_timing = f"{milestone['how']}, priced by the tokens these rows read"
+            estimated += milestone_each * len(milestone_at)
+        elif reusing.get("milestone") is not None:
+            milestone = reusing["milestone"]
+    elif timed == 0:
         time_why = "timed_steps=0"
     elif first is not None:
         time_why = "a resumed training: the first session's timing"
     elif not cuda and job.timed_steps is None:
         time_why = "the model is not on a CUDA GPU; timed_steps set by hand times the steps there too"
     else:
-        sizes = [_choice.tokens_read(r) for r in rows]
         largest = max(range(len(rows)), key=lambda i: (sizes[i], len(rows[i]["own"])))
         median = sorted(range(len(rows)), key=lambda i: sizes[i])[len(rows) // 2]
 
@@ -615,22 +710,29 @@ def prepare(job):
                                              statistics.mean(sizes))
         seconds_per_step = per_question * effective
         estimated = seconds_per_step * (total - start_step)
-        time_why = (f"the median of {timed} steps of one question timed after {_sessions.TIMING_WARMUP} to warm up, "
-                    f"on the question of the most tokens read, {sizes[largest]:,} tokens and "
-                    f"{len(rows[largest]['own'])} candidates, and on the median one, {sizes[median]:,} tokens; "
-                    f"each question priced on the line through the two at the mean, {statistics.mean(sizes):,.0f} "
-                    f"tokens, {effective} questions a step, the adapter training in each")
+        how = (f"the median of {timed} steps of one question timed after {_sessions.TIMING_WARMUP} to warm up, on the "
+               f"question of the most tokens read, {sizes[largest]:,} tokens and {len(rows[largest]['own'])} "
+               f"candidates, and on the median one, {sizes[median]:,} tokens")
+        time_why = (f"{how}; each question priced on the line through the two at the mean, "
+                    f"{statistics.mean(sizes):,.0f} tokens, {effective} questions a step, the adapter training in "
+                    "each")
+        steps = {"largest_tokens": sizes[largest], "largest_seconds": timing.step_seconds,
+                 "median_tokens": sizes[median], "median_seconds": small.step_seconds, "how": how}
         if milestone_rows is not None and milestone_at:
             sample = milestone_sample(milestone_rows)
             if answering is not None:
                 _choice.copy_trainable(chooser, answering[1])
             began = time.perf_counter()
             _choice.answer(answering[1] if answering is not None else chooser, sample)
+            sample_tokens = sum(map(_choice.tokens_read, sample))
             milestone_each = ((time.perf_counter() - began) * sum(map(_choice.tokens_read, milestone_rows))
-                              / sum(map(_choice.tokens_read, sample)))
+                              / sample_tokens)
             milestone_timing = (f"timed on {len(sample)} of the {len(milestone_rows):,} rows, spread over them, and "
                                 "scaled by the tokens they read" if len(sample) < len(milestone_rows)
                                 else f"timed on its {len(milestone_rows)} rows")
+            milestone = {"weights": answering_method,
+                         "seconds_per_token": milestone_each / sum(map(_choice.tokens_read, milestone_rows)),
+                         "how": f"timed on {len(sample)} rows of {sample_tokens:,} tokens"}
             estimated += milestone_each * len(milestone_at)
     if job.milestones is not None:
         what = f"the adapter and the head saved apart in {output}/{_milestones.FOLDER}/step-<N>"
@@ -653,28 +755,43 @@ def prepare(job):
                                        milestones=len(milestone_at or []), milestone_seconds=milestone_seconds,
                                        evaluations_counted=False)
     decisions.append(Decision("duration", "time", seconds_per_step, duration, time_why))
-    revision_basis = {
-        "planned_steps": total, "start_step": start_step,
-        "estimated_without_milestones": (estimated - milestone_seconds) if estimated is not None else None,
-        "milestone_seconds": milestone_each,
-        "milestones_what": what if job.milestones is not None else "",
-        "milestones_why": "", "milestone_value_key": "seconds",
-        "evaluations": 0, "eval_seconds": 0.0, "evaluations_counted": False}
     peak_gpu = peak_host = request = None
-    if timing is None:
+    memory_why = ("the GPU: the most PyTorch reserved over the timed steps on the question of the most tokens read; "
+                  "the host: the process's peak resident memory, loading included")
+    if timing is not None:
+        request, request_why = _sessions.memory_request(timing)
+        memory = {"peak_gpu_bytes": timing.peak_gpu_bytes, "peak_host_bytes": timing.peak_host_bytes,
+                  "request": request, "why": request_why}
+    if memory is None:
         decisions.append(Decision("memory", "memory", None, "not measured",
                                   f"measured over the timed steps, and none ran: {time_why}"))
     else:
-        peak_gpu, peak_host = timing.peak_gpu_bytes, timing.peak_host_bytes
-        request, request_why = _sessions.memory_request(timing)
+        peak_gpu, peak_host, request = memory["peak_gpu_bytes"], memory["peak_host_bytes"], memory["request"]
         decisions.append(Decision("memory", "memory", {"peak_gpu_bytes": peak_gpu, "peak_host_bytes": peak_host,
                                                        "memory_request_bytes": request},
                                   (f"peak {_gib(peak_gpu)} on the GPU, " if peak_gpu is not None else "")
                                   + f"{_gib(peak_host)} on the host; a job should ask for {request // 2**30} GiB "
-                                    f"({request_why})",
-                                  "the GPU: the most PyTorch reserved over the timed steps on the question of the "
-                                  "most tokens read; the host: the process's peak resident memory, loading included"))
-    free_bytes = torch.cuda.mem_get_info(device)[0] if cuda else None
+                                    f"({memory['why']})", memory_why))
+
+    # What was measured, kept for a later plan to reuse; or what this one reused
+    if reusing is not None:
+        device_name, free_bytes = reusing["device"], reusing["free_bytes"]
+        reused = "the time of a step, the memory" + (" and a milestone's time" if milestone_each is not None else "")
+        decisions.append(_reused_decision(
+            reusing, reused_from, reused,
+            "nothing they depend on changed (the model, the method, the attention, the LoRA rank and targets, the "
+            f"head and the candidates per pass), and the data's longest question reads {max(sizes):,} tokens, at "
+            f"most the {steps['largest_tokens']:,} measured"))
+        measurements = {**reusing, "from": reusing.get("from") or reused_from or None, "milestone": milestone}
+    else:
+        device_name = torch.cuda.get_device_name(device) if cuda else "the CPU"
+        free_bytes = torch.cuda.mem_get_info(device)[0] if cuda else None
+        measurements = None
+        if timing is not None and first is None:
+            measurements = {"key": measured_key(job), "device": device_name, "free_bytes": free_bytes,
+                            "facts": {"decisions": [d.to_dict() for d in decisions if d.name in MODEL_DECISIONS],
+                                      "targets": target_count, "cuda": cuda},
+                            "steps": steps, "memory": memory, "milestone": milestone}
     seconds = estimated
     if first is not None:
         decisions = [Decision(**first[d.name]) if d.name in RESUMED and d.name in first else d for d in decisions]
@@ -682,11 +799,10 @@ def prepare(job):
                                                  job._first["estimated_seconds"])
         peak_gpu, peak_host, request = (job._first["peak_gpu_bytes"], job._first["peak_host_bytes"],
                                         job._first["memory_request_bytes"])
-    device_name = torch.cuda.get_device_name(device) if cuda else "the CPU"
     plan = Plan(model=model_name, task=job.task, method=job.method, device=device_name, free_bytes=free_bytes,
                 decisions=_ordered(decisions), seconds_per_step=seconds_per_step, estimated_seconds=seconds,
                 peak_gpu_bytes=peak_gpu, peak_host_bytes=peak_host, memory_request_bytes=request,
-                revision_basis=revision_basis if first is None else None)
+                measurements=measurements)
     prepared = _Prepared(chooser, tokenizer, trainer, plan, output, milestones=milestone_at,
                          milestone_rows=milestone_rows)
     prepared.choice = {"config": config, "earlier": start["milestones"] if start is not None else [],

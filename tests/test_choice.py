@@ -313,6 +313,59 @@ def test_the_plan_gives_the_memory_a_job_should_ask_for(tokenizer, tmp_path):
     assert plan.seconds_per_step is not None
 
 
+def no_model(monkeypatch):
+    """The model loader and the trainer refuse: a plan that reuses measurements builds neither."""
+    def refused(*args, **kwargs):
+        raise AssertionError("a plan reusing measurements loaded the model or built the trainer")
+
+    monkeypatch.setattr(_choice_job, "_load", refused)
+    monkeypatch.setattr(_choice_job.ChoiceTrainer, "__init__", refused)
+
+
+def test_a_plan_reuses_an_earlier_plans_measurements_without_the_model(tokenizer, tmp_path, monkeypatch):
+    milestone_eval = write(tmp_path / "milestones.jsonl", rows(4))
+    earlier = make_job(tokenizer, tmp_path, timed_steps=1, milestones=0.5, milestone_eval=milestone_eval,
+                       report_to=[]).plan()
+    assert earlier["measurements"].text == "measured on the CPU" and earlier.measurements["milestone"] is not None
+    no_model(monkeypatch)
+    changed = make_job(tokenizer, tmp_path, milestones=0.25, milestone_eval=milestone_eval, report_to=[],
+                       recipe={"effective_batch": 4, "learning_rate": 5e-3})
+    plan = changed.plan(reuse=earlier.to_dict(), reused_from="plan job j1")
+    # The same data's mean question, four of them a step instead of two
+    assert plan.seconds_per_step == pytest.approx(2 * earlier.seconds_per_step)
+    assert plan["length"].value == 2 and plan["learning_rate"].value == 5e-3
+    assert plan["milestones"].value["steps"] == [1, 2]
+    assert plan["milestones"].value["seconds"] == pytest.approx(earlier["milestones"].value["seconds"])
+    assert (plan.memory_request_bytes, plan["memory"].value) == (earlier.memory_request_bytes, earlier["memory"].value)
+    assert plan["weights"] == earlier["weights"] and plan["targets"].text == earlier["targets"].text
+    assert [d.name for d in plan.decisions] == [d.name for d in earlier.decisions]
+    assert plan["measurements"].value == {"from": "plan job j1"}
+    assert plan["measurements"].text.startswith("reused from plan job j1, measured on the CPU: the time of a step")
+    again = make_job(tokenizer, tmp_path, report_to=[]).plan(reuse=plan, reused_from="plan job j2")
+    assert again["measurements"].value == {"from": "plan job j1"} and again.measurements["milestone"] is not None
+
+
+def test_a_plan_measures_again_when_what_the_measurements_depend_on_changed(tokenizer, tmp_path, monkeypatch):
+    earlier = make_job(tokenizer, tmp_path, timed_steps=1, report_to=[]).plan()
+    no_model(monkeypatch)
+    with pytest.raises(m2.MeasureAgain, match="the LoRA rank changed"):
+        make_job(tokenizer, tmp_path, report_to=[], recipe={"rank": 8}).plan(reuse=earlier)
+    with pytest.raises(m2.MeasureAgain, match="the head, the set layers, the candidates per pass changed"):
+        make_job(tokenizer, tmp_path, report_to=[],
+                 recipe={"choice_head": "scalar", "candidates_per_pass": 2}).plan(reuse=earlier)
+    longer = rows()
+    longer[3] = {**longer[3], "prompt": "the sloth sleeps and the hare runs and the sloth sleeps again "}
+    with pytest.raises(m2.MeasureAgain, match="longest question reads"):
+        make_job(tokenizer, tmp_path, data=write(tmp_path / "longer.jsonl", longer),
+                 report_to=[]).plan(reuse=earlier)
+    with pytest.raises(m2.MeasureAgain, match="timed no milestone"):
+        make_job(tokenizer, tmp_path, report_to=[], milestones=0.5,
+                 milestone_eval=write(tmp_path / "milestones.jsonl", rows(4))).plan(reuse=earlier)
+    # Shorter data is priced on the measured line, its memory bounded by the longer question measured
+    shorter = make_job(tokenizer, tmp_path, data=write(tmp_path / "shorter.jsonl", rows()[:2]), report_to=[])
+    assert shorter.plan(reuse=earlier).memory_request_bytes == earlier.memory_request_bytes
+
+
 def test_preprocessing_is_kept_and_read_by_the_plan(tokenizer, tmp_path):
     job = make_job(tokenizer, tmp_path)
     outcome = job.preprocess(tmp_path / "cache")

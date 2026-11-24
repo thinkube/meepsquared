@@ -180,49 +180,57 @@ def test_milestone_growth_is_above_one_and_needs_milestones():
     assert m2.TrainingJob.from_dict(job.to_dict()).milestone_growth == 1.5
 
 
-def plan_with_basis():
-    from meepsquared.job import Decision, Plan
+def sft_job(**fields):
+    import meepsquared as m2
 
-    basis = {"planned_steps": 1000, "start_step": 0, "estimated_without_milestones": 2000.0, "milestone_seconds": 60.0,
-             "milestones_what": "the adapter and the head saved apart, and 1,860 rows answered", "milestones_why": "",
-             "milestone_value_key": "seconds", "evaluations": 0, "eval_seconds": 0.0, "evaluations_counted": False}
+    return m2.TrainingJob(model="m", data="d.jsonl", **{"milestones": 0.5, **fields})
+
+
+def sft_plan(job):
+    from meepsquared.job import SFT_MEASUREMENTS, Decision, Plan
+
+    placement = {"planned_steps": 1000, "start_step": 0, "estimated_without_milestones": 2000.0,
+                 "milestone_seconds": 60.0, "milestones_what": "the adapter saved apart, and 40 rows answered",
+                 "milestones_why": "", "milestone_value_key": "generation_seconds", "evaluations": 0,
+                 "eval_seconds": 0.0, "evaluations_counted": True}
     decisions = [Decision("length", "length", 1000, "1 epoch, 1000 steps"),
                  Decision("duration", "time", 2.0, "old", "timed on 3 steps"),
                  Decision("memory", "memory", {"peak_gpu_bytes": 1}, "peak 21 GiB", "measured"),
-                 Decision("milestones", "milestones", {"steps": [500, 1000], "seconds": 60.0}, "2 at steps 500, 1,000")]
-    return Plan(model="m", task="choice", method="qlora", device="RTX 3090", free_bytes=None, decisions=decisions,
+                 Decision("milestones", "milestones", {"steps": [500, 1000]}, "2 at steps 500, 1,000")]
+    measurements = {"task": "sft", "format": SFT_MEASUREMENTS, "job": job._placement_free(),
+                    "placement": placement, "device": "RTX 3090"}
+    return Plan(model="m", task="sft", method="lora", device="RTX 3090", free_bytes=None, decisions=decisions,
                 seconds_per_step=2.0, estimated_seconds=2120.0, peak_gpu_bytes=1, memory_request_bytes=5,
-                revision_basis=basis)
+                measurements=measurements)
 
 
-def test_a_plan_places_its_milestones_again_without_measuring():
+def test_an_sft_plan_places_its_milestones_again_without_measuring():
     from meepsquared.job import Plan
 
-    plan = Plan.from_dict(plan_with_basis().to_dict())
-    revised = plan.with_milestones(0.1, 1.5, made="2026-11-24 18:00")
+    earlier = Plan.from_dict(sft_plan(sft_job()).to_dict())
+    revised = sft_job(milestones=0.1, milestone_growth=1.5).plan(reuse=earlier, reused_from="plan job j1")
     assert revised["milestones"].value["steps"] == [100, 250, 475, 813, 1000]
     assert revised.estimated_seconds == 2000.0 + 5 * 60.0
-    assert revised["duration"].text == "about 2 s per step, 38 min for 1000 steps and 5 milestones (5 min of it); " \
-                                       "the evaluations not counted"
     assert revised["duration"].reason == "timed on 3 steps"
-    assert (revised["memory"], revised.memory_request_bytes) == (plan["memory"], 5)
-    assert "only the milestones placed again" in revised["revised"].text and revised["revised"].value == "2026-11-24 18:00"
-    assert revised.with_milestones(None, None)["milestones"].text == "none"
+    assert (revised["memory"], revised.memory_request_bytes) == (earlier["memory"], 5)
+    assert revised["measurements"].text.startswith("reused from plan job j1, measured on RTX 3090")
+    # Reused again, the measurements still name the plan that measured them
+    again = sft_job(milestones=None).plan(reuse=revised, reused_from="plan job j2")
+    assert again["milestones"].text == "none" and again["measurements"].value == {"from": "plan job j1"}
 
 
-def test_a_plan_without_a_revision_basis_is_planned_again():
-    plan = plan_with_basis()
-    plan.revision_basis = None
-    with pytest.raises(ValueError, match="plan the job again"):
-        plan.with_milestones(0.1, None)
+def test_an_sft_plan_of_another_change_or_without_measured_milestones_measures_again():
+    import meepsquared as m2
 
-
-def test_a_plan_that_placed_no_milestones_measured_none_and_is_planned_again():
-    plan = plan_with_basis()
-    plan.revision_basis = {**plan.revision_basis, "milestones_what": "", "milestone_seconds": None}
-    with pytest.raises(ValueError, match="placed no milestones"):
-        plan.with_milestones(0.1, None)
-    assert plan.with_milestones(None, None)["milestones"].text == "none"
+    earlier = sft_plan(sft_job())
+    with pytest.raises(m2.MeasureAgain, match="recipe changed"):
+        sft_job(recipe=m2.Recipe(learning_rate=1e-5)).plan(reuse=earlier)
+    earlier.measurements["placement"]["milestones_what"] = ""
+    with pytest.raises(m2.MeasureAgain, match="placed no milestones"):
+        sft_job(milestones=0.1).plan(reuse=earlier)
+    earlier.measurements = None
+    with pytest.raises(m2.MeasureAgain, match="keeps no measurements"):
+        sft_job().plan(reuse=earlier)
 
 
 def test_a_milestone_is_timed_on_rows_spread_over_the_set():

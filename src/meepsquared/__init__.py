@@ -33,14 +33,14 @@ from meepsquared import _allocator
 _allocator.apply()  # before anything below can start CUDA
 
 from meepsquared import _trl, _varlen, _vllm  # noqa: E402
-from meepsquared.job import Overrides, Plan, Recipe, Result, TrainingJob  # noqa: E402
+from meepsquared.job import MeasureAgain, Overrides, Plan, Recipe, Result, TrainingJob  # noqa: E402
 from meepsquared.models import MeepLanguageModel, MeepModel  # noqa: E402
 from meepsquared.multi_gpu import fsdp_config  # noqa: E402
 from meepsquared.tagger import MeepTagger  # noqa: E402
 
 __version__ = "0.1.0"
-__all__ = ["TrainingJob", "Recipe", "Overrides", "Plan", "Result", "MeepLanguageModel", "MeepModel", "MeepTagger",
-           "fsdp_config", "__version__"]
+__all__ = ["TrainingJob", "Recipe", "Overrides", "Plan", "MeasureAgain", "Result", "MeepLanguageModel", "MeepModel",
+           "MeepTagger", "fsdp_config", "__version__"]
 
 _trl.patch_trainers()
 _varlen.register()
