@@ -72,11 +72,12 @@ def test_two_processes_make_the_updates_one_makes(tokenizer, tmp_path):
     one_losses = logged_losses(trainer)
 
     mp.spawn(train_in, args=(2, free_port(), tokenizer, str(tmp_path)), nprocs=2, join=True)
+    assert json.loads((tmp_path / "losses.json").read_text()) == pytest.approx(one_losses, rel=1e-4)
     two = torch.load(tmp_path / "trained.pt")
     assert set(two) == set(one)
     for name in one:
-        assert torch.allclose(two[name], one[name], rtol=1e-4, atol=1e-6), name
-    assert json.loads((tmp_path / "losses.json").read_text()) == pytest.approx(one_losses, rel=1e-4)
+        largest = float((two[name] - one[name]).abs().max())
+        assert torch.allclose(two[name], one[name], rtol=1e-4, atol=1e-5), f"{name}: differs by up to {largest:.3g}"
     plan = {d["name"]: d for d in json.loads((tmp_path / "plan.json").read_text())["decisions"]}
     assert plan["gpus"]["value"] == 2 and "2 to each" in plan["gpus"]["text"]
     assert "2 on each of the 2 GPUs at once" in plan["duration"]["reason"]

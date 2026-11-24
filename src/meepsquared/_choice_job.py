@@ -592,6 +592,11 @@ def prepare(job, reusing: dict = None, reused_from: str = ""):
 
     recipe, overrides = job.recipe, job.overrides
     gpus = gpus_of(job)
+    effective = recipe.effective_batch if recipe.effective_batch is not None else EFFECTIVE_BATCH
+    if effective % gpus:
+        raise ValueError(f"effective_batch {effective} is not shared out evenly among {gpus} GPUs: give a multiple of "
+                         f"{gpus}")
+    each = effective // gpus
     if reusing is None:
         join_launch(gpus)
     elif int(os.environ.get("WORLD_SIZE", 1)) > 1:
@@ -695,11 +700,6 @@ def prepare(job, reusing: dict = None, reused_from: str = ""):
                              "the head of the reference choice training has none"))
 
     # The length, and a start from a saved state
-    effective = recipe.effective_batch if recipe.effective_batch is not None else EFFECTIVE_BATCH
-    if effective % gpus:
-        raise ValueError(f"effective_batch {effective} is not shared out evenly among {gpus} GPUs: give a multiple of "
-                         f"{gpus}")
-    each = effective // gpus
     questions = job.steps * effective if job.steps is not None else math.ceil((job.epochs or 1) * len(rows))
     total = math.ceil(questions / effective)
     start, start_step = None, 0
