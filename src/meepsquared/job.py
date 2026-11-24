@@ -277,7 +277,7 @@ class Recipe:
     each word's best head, "argmax". schedule also takes "linear", a tagger's
     default (decay to 0 after the warm-up).
     Choice only (see meepsquared._choice): choice_head, the head that scores
-    the candidates, "set" (NanoJev's, with an attention over the candidates)
+    the candidates, "set" (the set head, with an attention over the candidates)
     or "scalar"; head_learning_rate, the head's rate (1e-3);
     candidates_per_pass, the candidates read together after the shared text
     (4); head_only, the first questions of the data that train the head alone,

@@ -29,7 +29,7 @@ group's reading run under torch.utils.checkpoint (non-reentrant), so both are
 read again in the backward pass instead of keeping their activations. The
 language model runs under bf16 autocast on a GPU; the head runs in float32.
 
-The head ("set", NanoJev's DecisionModel, or "scalar"): a LayerNorm and a
+The head ("set", the set head, or "scalar"): a LayerNorm and a
 linear score; "set" adds an attention over the candidates of the question,
 whose change starts at 0. The loss of a question is the cross-entropy of the
 softmax of its scores against its target, over all its candidates.
@@ -49,7 +49,7 @@ import torch
 from torch import nn
 
 HEADS = ("set", "scalar")
-# The set attention's width and heads (NanoJev)
+# The set attention's width and heads
 SET_WIDTH = 128
 SET_HEADS = 4
 # The files of a saved chooser, beside the adapter's

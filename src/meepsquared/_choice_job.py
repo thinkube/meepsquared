@@ -69,7 +69,7 @@ QLORA_DTYPE = torch.bfloat16
 QLORA_DOUBLE_QUANT = False
 # The seed of the head's initial weights (Transformers' default seed)
 SEED = 42
-NANOJEV = "the setting NanoJev's head was trained with on Gemma 4 E4B"
+REFERENCE = "the setting of the reference choice training on Gemma 4 E4B"
 
 
 def ramp(step: int, warmup: int, total: int) -> float:
@@ -410,19 +410,19 @@ def prepare(job):
     model_name = job.model if isinstance(job.model, str) else str(model.config._name_or_path)
     config = {"head": kind, "model": model_name, "method": job.method, "candidates_per_pass": per_pass}
     chooser._meepsquared = {"choice": config}
-    decisions.append(_decide("rank", "LoRA rank", recipe.rank, RANK, str, NANOJEV))
-    decisions.append(_decide("alpha", "LoRA alpha", recipe.alpha, ALPHA, str, NANOJEV))
-    decisions.append(_decide("dropout", "LoRA dropout", recipe.dropout, DROPOUT, str, NANOJEV))
+    decisions.append(_decide("rank", "LoRA rank", recipe.rank, RANK, str, REFERENCE))
+    decisions.append(_decide("alpha", "LoRA alpha", recipe.alpha, ALPHA, str, REFERENCE))
+    decisions.append(_decide("dropout", "LoRA dropout", recipe.dropout, DROPOUT, str, REFERENCE))
     decisions.append(_decide("targets", "targets", recipe.targets, TARGETS, ", ".join,
                              f"the attention's projections of the language model, its vision, audio and image "
                              f"modules left out: {len(targets)} layers"))
-    head_text = {"set": "NanoJev's: a LayerNorm, a scalar score, and an attention over the question's candidates",
+    head_text = {"set": "the set head: a LayerNorm, a scalar score, and an attention over the question's candidates",
                  "scalar": "a LayerNorm and a scalar score of each candidate alone"}
     decisions.append(_decide("choice_head", "head", recipe.choice_head, HEAD, head_text.get,
                              "the score of a candidate from the last state of its reading"))
     decisions.append(_decide("candidates_per_pass", "per pass", recipe.candidates_per_pass, CANDIDATES_PER_PASS,
                              lambda n: f"{n} candidates read together after the shared text, which is read once",
-                             NANOJEV))
+                             REFERENCE))
 
     # The length, and a start from a saved state
     effective = recipe.effective_batch if recipe.effective_batch is not None else EFFECTIVE_BATCH
@@ -458,27 +458,27 @@ def prepare(job):
     weight_decay = recipe.weight_decay if recipe.weight_decay is not None else WEIGHT_DECAY
     max_grad_norm = recipe.max_grad_norm if recipe.max_grad_norm is not None else MAX_GRAD_NORM
     decisions.append(_decide("effective_batch", "batch", recipe.effective_batch, EFFECTIVE_BATCH,
-                             lambda n: f"{n} questions per update, one per forward pass", NANOJEV))
+                             lambda n: f"{n} questions per update, one per forward pass", REFERENCE))
     decisions.append(Decision("order", "order", "data", "the rows in the order of the data, not shuffled",
                               "the data is written in the order to train"))
     decisions.append(Decision("optimizer", "optimizer", "adamw_torch",
-                              "AdamW (PyTorch): the adapter's parameters, then the head's", NANOJEV))
+                              "AdamW (PyTorch): the adapter's parameters, then the head's", REFERENCE))
     decisions.append(_decide("learning_rate", "learning rate", recipe.learning_rate, LEARNING_RATE,
-                             lambda r: f"{r:g} for the adapter", NANOJEV))
+                             lambda r: f"{r:g} for the adapter", REFERENCE))
     decisions.append(_decide("head_learning_rate", "head rate", recipe.head_learning_rate, HEAD_LEARNING_RATE,
-                             lambda r: f"{r:g} for the head", NANOJEV))
+                             lambda r: f"{r:g} for the head", REFERENCE))
     decisions.append(_decide("schedule", "schedule", recipe.schedule, SCHEDULE,
                              lambda s: "linear warm-up, then linear decay to 0 over the planned steps",
-                             f"min(1, (s + 1) / warm-up) x (1 - s / {total}) at step s; {NANOJEV}"))
+                             f"min(1, (s + 1) / warm-up) x (1 - s / {total}) at step s; {REFERENCE}"))
     decisions.append(_decide("warmup_steps", "warm-up", recipe.warmup_steps, WARMUP_STEPS, lambda n: f"{n} steps",
-                             NANOJEV))
+                             REFERENCE))
     decisions.append(_decide("head_only", "head only", recipe.head_only, HEAD_ONLY,
                              lambda n: f"the first {n:,} questions of the data train the head alone, the adapter "
-                                       "frozen", NANOJEV))
+                                       "frozen", REFERENCE))
     decisions.append(_decide("max_grad_norm", "clipping", recipe.max_grad_norm, MAX_GRAD_NORM,
-                             lambda n: f"gradient norm at most {n:g}, the adapter and the head together", NANOJEV))
+                             lambda n: f"gradient norm at most {n:g}, the adapter and the head together", REFERENCE))
     decisions.append(_decide("weight_decay", "weight decay", recipe.weight_decay, WEIGHT_DECAY, lambda n: f"{n:g}",
-                             NANOJEV))
+                             REFERENCE))
     length = (f"{job.steps} steps" if job.steps is not None
               else f"{job.epochs or 1:g} epoch{'s' if (job.epochs or 1) != 1 else ''}")
     decisions.append(Decision("length", "length", total, f"{length}: {questions:,} questions, {total} steps",
