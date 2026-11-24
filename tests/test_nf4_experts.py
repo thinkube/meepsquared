@@ -111,10 +111,15 @@ def test_nf4_experts_compute_as_their_dequantized_stacks_forward_and_backward(ch
     out_reference, grad_reference = run(reference, ids)
     assert relative(out, out_reference) < 1e-2
     assert relative(grad, grad_reference) < 2e-2
-    # NF4 changed the stacks, within what a 4-bit quantization does
+    # NF4 changed the stacks, each weight within half the widest gap of NF4's levels (0.28) of its block's largest:
+    # the outputs then differ from the 16-bit model's, by an amount the routing of a random model does not bound
+    stacks = dict(original.named_parameters())
+    for name, experts in _nf4_experts.nf4_modules(model):
+        for attr, stack in _nf4_experts.dequantized_stacks(experts, torch.float32):
+            weight = stacks[f"{name}.{attr}"].float()
+            assert 0 < relative(stack, weight) < 0.15
     with torch.no_grad():
-        out_16bit = original(input_ids=ids).logits.float()
-    assert 0 < relative(out, out_16bit) < 0.25
+        assert relative(out, original(input_ids=ids).logits.float()) > 0
 
 
 def test_stacks_loaded_in_16_bits_are_quantized_as_the_checkpoints(checkpoint):
