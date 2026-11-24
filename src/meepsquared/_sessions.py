@@ -455,6 +455,19 @@ def memory_request(timing: Timing) -> tuple:
     return request, f"{how}, {MEMORY_MARGIN:.0%} over it, rounded up to a whole GiB"
 
 
+def time_line(seconds_per_step: float, estimated: float, steps: int, evaluations: int = 0, eval_seconds: float = 0.0,
+              milestones: int = 0, milestone_seconds: float = 0.0, evaluations_counted: bool = True) -> str:
+    """The plan's time: per step, in all, and the share of the evaluations and of the milestones."""
+    text = f"about {seconds_per_step:.3g} s per step, {duration_text(estimated)} for {steps} steps"
+    if evaluations:
+        text += f" with {evaluations} evaluations ({duration_text(eval_seconds)} of it)"
+    if milestone_seconds:
+        text += f" and {milestones} milestones ({duration_text(milestone_seconds)} of it)"
+    if not evaluations_counted:
+        text += "; the evaluations not counted"
+    return text
+
+
 def duration_text(seconds: float) -> str:
     """A length of time in hours and minutes, minutes, or seconds."""
     if seconds >= 3600:

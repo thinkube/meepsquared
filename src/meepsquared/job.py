@@ -533,6 +533,9 @@ class Plan:
     peak_gpu_bytes: Optional[int] = None
     peak_host_bytes: Optional[int] = None
     memory_request_bytes: Optional[int] = None
+    # What with_milestones needs to place the milestones again without measuring anything: the time per step, the
+    # estimate without the milestones, the planned and the first steps, one milestone's time, and what one does
+    revision_basis: Optional[dict] = None
 
     def __getitem__(self, name: str) -> Decision:
         for decision in self.decisions:
@@ -552,7 +555,62 @@ class Plan:
                 "free_bytes": self.free_bytes, "decisions": [d.to_dict() for d in self.decisions],
                 "seconds_per_step": self.seconds_per_step, "estimated_seconds": self.estimated_seconds,
                 "peak_gpu_bytes": self.peak_gpu_bytes, "peak_host_bytes": self.peak_host_bytes,
-                "memory_request_bytes": self.memory_request_bytes}
+                "memory_request_bytes": self.memory_request_bytes, "revision_basis": self.revision_basis}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Plan":
+        """A plan as to_dict() wrote it."""
+        fields = {k: v for k, v in data.items() if k != "decisions"}
+        return cls(decisions=[Decision(**d) for d in data["decisions"]], **fields)
+
+    def with_milestones(self, milestones: Optional[float], growth: Optional[float], made: str = "") -> "Plan":
+        """This plan with the milestones placed again (milestones and growth as TrainingJob takes them) and nothing
+        measured again: the time per step, the memory and one milestone's time are this plan's, which measured
+        them; the milestones' steps, the estimate and the time line are worked out again. For a job that differs
+        from this plan's only in where its milestones are. made: when this plan was made, for the decision that
+        says it was revised."""
+        from meepsquared import _milestones, _sessions
+
+        basis = self.revision_basis
+        if basis is None:
+            raise ValueError("this plan keeps no revision basis (it was made before plans could be revised, or it "
+                             "measured nothing): plan the job again")
+        if growth is not None and milestones is None:
+            raise ValueError("milestone_growth: no milestones; give milestones, the share of the planned steps "
+                             "before the first milestone")
+        planned, start = basis["planned_steps"], basis["start_step"]
+        each = basis["milestone_seconds"]
+        decisions = [d for d in self.decisions if d.name not in ("milestones", "duration", "revised")]
+        estimated = basis["estimated_without_milestones"]
+        at = []
+        if milestones is None:
+            decisions.append(Decision("milestones", "milestones", None, "none", "no milestones given"))
+        else:
+            at = [s for s in _milestones.steps(planned, milestones, growth) if s > start]
+            what = basis["milestones_what"]
+            decisions.append(Decision(
+                "milestones", "milestones", {"steps": at, basis["milestone_value_key"]: each},
+                f"{len(at)} at steps {_steps_text(at, growth is not None)}: {what}",
+                _milestones.spacing_text(planned, milestones, growth) + basis["milestones_why"]))
+        milestone_seconds = each * len(at) if each is not None else 0.0
+        if self.seconds_per_step is not None and estimated is not None:
+            estimated += milestone_seconds
+            line = _sessions.time_line(self.seconds_per_step, estimated, planned - start, basis["evaluations"],
+                                       basis["eval_seconds"], len(at), milestone_seconds,
+                                       basis["evaluations_counted"])
+        else:
+            estimated, line = None, "not timed"
+        old = self["duration"]
+        decisions.append(Decision("duration", "time", self.seconds_per_step, line, old.reason))
+        decisions.append(Decision("revised", "revised", made or None,
+                                  f"from the plan{f' of {made}' if made else ''}, with only the milestones placed "
+                                  "again", "the time per step, the memory and one milestone's time are that plan's, "
+                                  "measured then; nothing was measured again"))
+        return Plan(model=self.model, task=self.task, method=self.method, device=self.device,
+                    free_bytes=self.free_bytes, decisions=_ordered(decisions), seconds_per_step=self.seconds_per_step,
+                    estimated_seconds=estimated, peak_gpu_bytes=self.peak_gpu_bytes,
+                    peak_host_bytes=self.peak_host_bytes, memory_request_bytes=self.memory_request_bytes,
+                    revision_basis=basis)
 
 
 @dataclass
@@ -1984,6 +2042,7 @@ class TrainingJob:
         decisions.append(Decision("length", "length", planned, length,
                                   "as given" if self.steps or self.epochs else "one epoch, as no steps were given"))
         evaluations = eval_batches = 0
+        eval_seconds = 0.0
         if eval_prepared is not None:
             eval_count = len(eval_prepared)
             eval_batches = math.ceil(math.ceil(eval_count / world) / micro)
@@ -2136,14 +2195,19 @@ class TrainingJob:
             decisions.append(Decision("milestones", "milestones", None, "none", "no milestones given"))
         duration = "not timed"
         if seconds_per_step is not None:
-            duration = (f"about {seconds_per_step:.3g} s per step, {_sessions.duration_text(estimated)} for "
-                        f"{planned} steps")
-            if evaluations:
-                duration += f" with {evaluations} evaluations ({_sessions.duration_text(eval_seconds)} of it)"
-            if milestone_seconds:
-                duration += (f" and {len(milestone_at)} milestones ({_sessions.duration_text(milestone_seconds)} "
-                             "of it)")
+            duration = _sessions.time_line(seconds_per_step, estimated, planned, evaluations or 0, eval_seconds,
+                                           len(milestone_at or []), milestone_seconds)
         decisions.append(Decision("duration", "time", seconds_per_step, duration, time_why))
+        revision_basis = {
+            "planned_steps": planned, "start_step": 0,
+            "estimated_without_milestones": (estimated - milestone_seconds) if estimated is not None else None,
+            "milestone_seconds": each if self.milestones is not None else None,
+            "milestones_what": what if self.milestones is not None else "",
+            "milestones_why": (why[len(_milestones.spacing_text(planned, self.milestones, self.milestone_growth)):]
+                               if self.milestones is not None else ""),
+            "milestone_value_key": "generation_seconds",
+            "evaluations": evaluations or 0, "eval_seconds": eval_seconds if evaluations else 0.0,
+            "evaluations_counted": True}
 
         # The memory, measured over the timed steps and the evaluation pass
         peak_gpu = peak_host = request = None
@@ -2176,7 +2240,8 @@ class TrainingJob:
         plan = Plan(model=self.model if isinstance(self.model, str) else str(model.config._name_or_path),
                     task=self.task, method=self.method, device=device_name, free_bytes=free_bytes,
                     decisions=_ordered(decisions), seconds_per_step=seconds_per_step, estimated_seconds=estimated,
-                    peak_gpu_bytes=peak_gpu, peak_host_bytes=peak_host, memory_request_bytes=request)
+                    peak_gpu_bytes=peak_gpu, peak_host_bytes=peak_host, memory_request_bytes=request,
+                    revision_basis=revision_basis if first is None else None)
         self._prepared = _Prepared(peft_model, tokenizer, trainer, plan, output, milestones=milestone_at,
                                    milestone_rows=milestone_rows, milestone_scorer=milestone_scorer)
         return self._prepared
@@ -2194,7 +2259,7 @@ ORDER = ["loading", "allocator_cap", "weights", "attention", "padding_free", "li
          "micro_batch",
          "accumulation", "order", "rank",
          "alpha", "dropout", "targets", "experts", "optimizer", "learning_rate", "schedule", "warmup_steps",
-         "max_grad_norm", "weight_decay", "length", "duration", "memory", "evaluation", "milestones", "milestone_weights", "milestone_engine",
+         "max_grad_norm", "weight_decay", "length", "duration", "memory", "evaluation", "milestones", "milestone_weights", "milestone_engine", "revised",
          "data_checks",
          "source_weights", "max_length", "answers_only", "labels", "words", "bottleneck", "head_dropout", "keep",
          "decode", "choice_head", "set_layers", "none_output", "candidates_per_pass", "head_learning_rate", "head_only", "start_from",

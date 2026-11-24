@@ -178,3 +178,49 @@ def test_milestone_growth_is_above_one_and_needs_milestones():
         m2.TrainingJob(model="x", data="d.jsonl", milestone_growth=1.5)
     job = m2.TrainingJob(model="x", data="d.jsonl", milestones=0.01, milestone_growth=1.5)
     assert m2.TrainingJob.from_dict(job.to_dict()).milestone_growth == 1.5
+
+
+def plan_with_basis():
+    from meepsquared.job import Decision, Plan
+
+    basis = {"planned_steps": 1000, "start_step": 0, "estimated_without_milestones": 2000.0, "milestone_seconds": 60.0,
+             "milestones_what": "the adapter and the head saved apart, and 1,860 rows answered", "milestones_why": "",
+             "milestone_value_key": "seconds", "evaluations": 0, "eval_seconds": 0.0, "evaluations_counted": False}
+    decisions = [Decision("length", "length", 1000, "1 epoch, 1000 steps"),
+                 Decision("duration", "time", 2.0, "old", "timed on 3 steps"),
+                 Decision("memory", "memory", {"peak_gpu_bytes": 1}, "peak 21 GiB", "measured"),
+                 Decision("milestones", "milestones", {"steps": [500, 1000], "seconds": 60.0}, "2 at steps 500, 1,000")]
+    return Plan(model="m", task="choice", method="qlora", device="RTX 3090", free_bytes=None, decisions=decisions,
+                seconds_per_step=2.0, estimated_seconds=2120.0, peak_gpu_bytes=1, memory_request_bytes=5,
+                revision_basis=basis)
+
+
+def test_a_plan_places_its_milestones_again_without_measuring():
+    from meepsquared.job import Plan
+
+    plan = Plan.from_dict(plan_with_basis().to_dict())
+    revised = plan.with_milestones(0.1, 1.5, made="2026-11-24 18:00")
+    assert revised["milestones"].value["steps"] == [100, 250, 475, 813, 1000]
+    assert revised.estimated_seconds == 2000.0 + 5 * 60.0
+    assert revised["duration"].text == "about 2 s per step, 38 min for 1000 steps and 5 milestones (5 min of it); " \
+                                       "the evaluations not counted"
+    assert revised["duration"].reason == "timed on 3 steps"
+    assert (revised["memory"], revised.memory_request_bytes) == (plan["memory"], 5)
+    assert "only the milestones placed again" in revised["revised"].text and revised["revised"].value == "2026-11-24 18:00"
+    assert revised.with_milestones(None, None)["milestones"].text == "none"
+
+
+def test_a_plan_without_a_revision_basis_is_planned_again():
+    plan = plan_with_basis()
+    plan.revision_basis = None
+    with pytest.raises(ValueError, match="plan the job again"):
+        plan.with_milestones(0.1, None)
+
+
+def test_a_milestone_is_timed_on_rows_spread_over_the_set():
+    from meepsquared import _choice_job
+
+    rows = list(range(1860))
+    sample = _choice_job.milestone_sample(rows)
+    assert len(sample) == _choice_job.MILESTONE_SAMPLE and sample[0] == 0 and sample[-1] > 1800
+    assert _choice_job.milestone_sample(rows[:10]) == rows[:10]

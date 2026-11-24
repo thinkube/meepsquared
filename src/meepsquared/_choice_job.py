@@ -60,6 +60,9 @@ HEAD_ONLY = 500
 CANDIDATES_PER_PASS = 4
 HEAD = "set"
 SET_LAYERS = 1
+# The plan times one milestone on this many of its rows, spread over them, and scales the time by the tokens read:
+# the rows' time is the tokens they read, and answering every row once can take as long as the rest of the plan
+MILESTONE_SAMPLE = 64
 NONE_OUTPUT = False
 WEIGHT_DECAY = 0.0
 MAX_GRAD_NORM = 1.0
@@ -312,6 +315,13 @@ def _load(job, decisions: list):
     decisions.append(_decide("attention", "attention", overrides.attention, ATTENTION, str,
                              "the candidates are read after the shared cache, right-padded, with a mask"))
     return model
+
+
+def milestone_sample(rows: list) -> list:
+    """At most MILESTONE_SAMPLE of the rows, spread evenly over them."""
+    if len(rows) <= MILESTONE_SAMPLE:
+        return list(rows)
+    return [rows[i * len(rows) // MILESTONE_SAMPLE] for i in range(MILESTONE_SAMPLE)]
 
 
 def attention_of(job) -> str:
@@ -581,6 +591,7 @@ def prepare(job):
     timed = job.timed_steps if job.timed_steps is not None else TIMED_STEPS
     seconds_per_step = estimated = timing = None
     milestone_each = None
+    milestone_timing = ""
     if timed == 0:
         time_why = "timed_steps=0"
     elif first is not None:
@@ -610,11 +621,16 @@ def prepare(job):
                     f"each question priced on the line through the two at the mean, {statistics.mean(sizes):,.0f} "
                     f"tokens, {effective} questions a step, the adapter training in each")
         if milestone_rows is not None and milestone_at:
-            began = time.perf_counter()
+            sample = milestone_sample(milestone_rows)
             if answering is not None:
                 _choice.copy_trainable(chooser, answering[1])
-            _choice.answer(answering[1] if answering is not None else chooser, milestone_rows)
-            milestone_each = time.perf_counter() - began
+            began = time.perf_counter()
+            _choice.answer(answering[1] if answering is not None else chooser, sample)
+            milestone_each = ((time.perf_counter() - began) * sum(map(_choice.tokens_read, milestone_rows))
+                              / sum(map(_choice.tokens_read, sample)))
+            milestone_timing = (f"timed on {len(sample)} of the {len(milestone_rows):,} rows, spread over them, and "
+                                "scaled by the tokens they read" if len(sample) < len(milestone_rows)
+                                else f"timed on its {len(milestone_rows)} rows")
             estimated += milestone_each * len(milestone_at)
     if job.milestones is not None:
         what = f"the adapter and the head saved apart in {output}/{_milestones.FOLDER}/step-<N>"
@@ -623,7 +639,7 @@ def prepare(job):
             what += (f", and {len(milestone_rows):,} rows answered by their top candidate, the right ones counted "
                      f"({', '.join(groups)})")
             if milestone_each is not None:
-                what += f"; each about {_sessions.duration_text(milestone_each)}"
+                what += f"; each about {_sessions.duration_text(milestone_each)} ({milestone_timing})"
         decisions.append(Decision("milestones", "milestones", {"steps": milestone_at, "seconds": milestone_each},
                                   f"{len(milestone_at)} at steps "
                                   f"{_steps_text(milestone_at, job.milestone_growth is not None)}: {what}",
@@ -631,10 +647,19 @@ def prepare(job):
     else:
         decisions.append(Decision("milestones", "milestones", None, "none", "no milestones given"))
     duration = "not timed"
+    milestone_seconds = milestone_each * len(milestone_at) if milestone_each is not None and milestone_at else 0.0
     if seconds_per_step is not None:
-        duration = (f"about {seconds_per_step:.3g} s per step, {_sessions.duration_text(estimated)} for "
-                    f"{total - start_step} steps; the evaluations not counted")
+        duration = _sessions.time_line(seconds_per_step, estimated, total - start_step,
+                                       milestones=len(milestone_at or []), milestone_seconds=milestone_seconds,
+                                       evaluations_counted=False)
     decisions.append(Decision("duration", "time", seconds_per_step, duration, time_why))
+    revision_basis = {
+        "planned_steps": total, "start_step": start_step,
+        "estimated_without_milestones": (estimated - milestone_seconds) if estimated is not None else None,
+        "milestone_seconds": milestone_each,
+        "milestones_what": what if job.milestones is not None else "",
+        "milestones_why": "", "milestone_value_key": "seconds",
+        "evaluations": 0, "eval_seconds": 0.0, "evaluations_counted": False}
     peak_gpu = peak_host = request = None
     if timing is None:
         decisions.append(Decision("memory", "memory", None, "not measured",
@@ -660,7 +685,8 @@ def prepare(job):
     device_name = torch.cuda.get_device_name(device) if cuda else "the CPU"
     plan = Plan(model=model_name, task=job.task, method=job.method, device=device_name, free_bytes=free_bytes,
                 decisions=_ordered(decisions), seconds_per_step=seconds_per_step, estimated_seconds=seconds,
-                peak_gpu_bytes=peak_gpu, peak_host_bytes=peak_host, memory_request_bytes=request)
+                peak_gpu_bytes=peak_gpu, peak_host_bytes=peak_host, memory_request_bytes=request,
+                revision_basis=revision_basis if first is None else None)
     prepared = _Prepared(chooser, tokenizer, trainer, plan, output, milestones=milestone_at,
                          milestone_rows=milestone_rows)
     prepared.choice = {"config": config, "earlier": start["milestones"] if start is not None else [],
