@@ -61,6 +61,16 @@ where its milestones are. The plan's line `measurements` says what it reused
 and from which plan, or that it measured. The caller vouches that the job runs
 on the GPU of the earlier plan (its `device`).
 
+A choice job whose model fits on one GPU trains on several with `gpus=N`,
+launched as N processes (`torchrun --nproc_per_node N -m meepsquared train
+job.yaml`). Each process holds its own copy of the model and reads every N-th
+question, so an update's questions are shared out among the GPUs; the
+gradients of the adapter and the head are summed among them before the
+optimizer step, and the update is the one a single GPU makes from the same
+questions. The plan times the questions on every GPU at once and the sum of
+the gradients, and asks memory for every process. A milestone's rows are
+shared out the same way.
+
 ### What the user gives
 
 | Field | Meaning | Default |

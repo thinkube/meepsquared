@@ -20,6 +20,15 @@ steps). For the first head_only questions of the data the adapter is frozen
 and the language model reads without gradients; the head learns. The loss of
 a step is the sum of its questions' losses, each divided by effective_batch.
 
+With gpus=N the training is a launch of N processes (torchrun), each on its
+own GPU with its own copy of the model, the adapter and the head, made equal
+at the start. Each process reads every N-th question of the data, so an
+update's effective_batch questions are shared out, effective_batch / N to
+each; before the optimizer step the gradients of the adapter and the head are
+summed among the processes (sum_gradients), and each process then makes the
+same step: the update is the one a single GPU makes from the same questions.
+A milestone's rows are shared out the same way and its answers gathered.
+
 A checkpoint holds the adapter, the head, the optimizer, the scheduler and the
 trainer's state; a resumed training goes on at its question and step.
 start_from starts a new training from a state made outside meepsquared (see
@@ -32,6 +41,7 @@ Milestones save the adapter and the head apart and, with milestone_eval,
 answer its rows: each row's top candidate, and the count of right ones.
 """
 
+import dataclasses
 import functools
 import json
 import math
@@ -77,7 +87,9 @@ SEED = 42
 REFERENCE = "the setting of the reference choice training on Gemma 4 E4B"
 # The format of the measurements a choice plan keeps for a later plan to reuse (measured_key): raised when what the
 # time of a step or the memory depends on changes in Meep², so that measurements of other code are not reused
-MEASUREMENTS = 1
+MEASUREMENTS = 2
+# The times the plan sums the gradients among the GPUs to time it, after one to warm up
+TIMED_SUMS = 5
 # The lines of the plan that need the model loaded, which a plan reusing measurements takes from the plan that
 # measured them: what they depend on is in the measurements' key
 MODEL_DECISIONS = ("loading", "allocator_cap", "weights")
@@ -121,7 +133,7 @@ def one(batch: list) -> dict:
 class ChoiceTrainer(Trainer):
     """Transformers' Trainer for a chooser (see the module's docstring). settings: rows, eval_rows, head_only,
     effective_batch, learning_rate, head_learning_rate, weight_decay, warmup_steps, config, start (a start_from
-    state or None), start_step."""
+    state or None), start_step, gpus."""
 
     def __init__(self, *args, settings: dict, **kwargs):
         super().__init__(*args, **kwargs)
@@ -129,6 +141,31 @@ class ChoiceTrainer(Trainer):
         self._start_folder = None
         # compute_loss divides each question's loss by effective_batch itself
         self.loss_is_scaled_for_ga = True
+        if settings["gpus"] > 1:
+            # Each process keeps its chooser as it is, not wrapped in DistributedDataParallel: the gradients are
+            # summed by sum_gradients before the step. DDP would first send the 4-bit weights of process 0 to the
+            # others, and its reducer expects a gradient of every adapter parameter, which the head-only questions
+            # do not give.
+            self.accelerator.prepare_model = lambda model, device_placement=None, evaluation_mode=False: model
+
+    def _sum_gradients(self) -> None:
+        if self.settings["gpus"] > 1:
+            sum_gradients(list(self.model.trainable().values()))
+
+    def _clip_grad_norm(self, model):
+        self._sum_gradients()
+        return super()._clip_grad_norm(model)
+
+    def _get_grad_norm(self, model, grad_norm=None):
+        # Without clipping, the gradients are summed here, which the Trainer calls before every optimizer step too
+        if not (self.args.max_grad_norm and self.args.max_grad_norm > 0):
+            self._sum_gradients()
+        return super()._get_grad_norm(model, grad_norm=grad_norm)
+
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        # The Trainer logs the mean over the processes of each one's loss, the sum of its questions' losses each
+        # divided by effective_batch; times the number of processes, the mean over the update's questions
+        return super().training_step(model, inputs, num_items_in_batch) * self.settings["gpus"]
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         s = self.settings
@@ -231,15 +268,22 @@ class ChoiceMilestones(_milestones.Milestones):
         return self.earlier + super().records()
 
     def on_step_end(self, args, state, control, model=None, **kwargs):
+        # With several GPUs every process comes here: the first one saves and writes, and each one answers its share
+        # of the rows. The first one renames the milestone's folder only once every process has answered, so each
+        # finds it not done.
         step = state.global_step
-        if step not in self.at or not state.is_world_process_zero or _milestones.done(self.output, step) is not None:
+        if step not in self.at or _milestones.done(self.output, step) is not None:
+            return
+        first = state.is_world_process_zero
+        if self.found is None and not first:
             return
         began = time.perf_counter()
         chooser = self.trainer.model
         final = _milestones.folder(self.output, step)
         partial = final.with_name(final.name + ".partial")
-        shutil.rmtree(partial, ignore_errors=True)
-        _choice.save(chooser, partial, self.config)
+        if first:
+            shutil.rmtree(partial, ignore_errors=True)
+            _choice.save(chooser, partial, self.config)
         parts = {"saving": round(time.perf_counter() - began, 1)}
         record = {"step": step, "planned_steps": state.max_steps, "folder": str(final)}
         if self.found is not None:
@@ -248,7 +292,9 @@ class ChoiceMilestones(_milestones.Milestones):
                 method, answerer = self.answering
                 _choice.copy_trainable(chooser, answerer)
                 record["weights"] = method
-            found = _choice.answer(answerer, self.found)
+            found = share_answers(answerer, self.found, self.trainer.settings["gpus"])
+            if not first:
+                return
             with (partial / _choice.ANSWERS).open("w") as f:
                 for row, (best, probability) in zip(self.found, found):
                     f.write(json.dumps({"group": row.get("group") or _choice.GROUP, "chosen": best,
@@ -372,13 +418,124 @@ def measured_key(job) -> dict:
                            else None),
             "none_output": recipe.none_output if recipe.none_output is not None else NONE_OUTPUT,
             "candidates_per_pass": (recipe.candidates_per_pass if recipe.candidates_per_pass is not None
-                                    else CANDIDATES_PER_PASS)}
+                                    else CANDIDATES_PER_PASS),
+            "gpus": gpus_of(job)}
 
 
 KEY_NAMES = {"format": "Meep²'s measurement format", "model": "the model", "method": "the method",
              "attention": "the attention", "rank": "the LoRA rank", "targets": "the LoRA targets", "head": "the head",
              "set_layers": "the set layers", "none_output": "the none output",
-             "candidates_per_pass": "the candidates per pass"}
+             "candidates_per_pass": "the candidates per pass", "gpus": "the number of GPUs"}
+
+
+def _shared_text(effective: int, gpus: int, sync: float) -> str:
+    """How the questions of a step are priced, for the plan's line "time"."""
+    if gpus == 1:
+        return f"{effective} questions a step, the adapter training in each"
+    return (f"{effective} questions a step, {effective // gpus} on each of the {gpus} GPUs at once, the adapter "
+            f"training in each, and {sync:.2f} s to sum the gradients among them, timed")
+
+
+def _rows_shared(gpus: int) -> str:
+    return f", the rows shared out among the {gpus} GPUs" if gpus > 1 else ""
+
+
+def gpus_of(job) -> int:
+    return job.gpus if job.gpus is not None else 1
+
+
+def join_launch(gpus: int) -> None:
+    """Checks this process is one of a launch of `gpus` processes; with several, puts it on its GPU (LOCAL_RANK) and
+    joins their process group: NCCL among GPUs, Gloo among processes on the CPU."""
+    launched = int(os.environ.get("WORLD_SIZE", 1))
+    if launched != gpus:
+        raise ValueError(f"gpus={gpus}, and this process is one of a launch of {launched}: launch the job with "
+                         f"torchrun --nproc_per_node {gpus}" if gpus > 1 else
+                         f"this process is one of a launch of {launched}, and the job trains on one GPU: give gpus="
+                         f"{launched}")
+    if gpus == 1:
+        return
+    import torch.distributed as dist
+
+    if dist.is_initialized():
+        return
+    if torch.cuda.is_available():
+        local = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local)
+        dist.init_process_group("nccl", device_id=torch.device("cuda", local))
+    else:
+        dist.init_process_group("gloo")
+
+
+def _device():
+    return torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
+
+
+def sum_gradients(parameters: list) -> None:
+    """Each parameter's gradient summed over the processes of the launch, in place. A parameter no process has a
+    gradient for keeps none, so that the optimizer leaves it as one GPU would (the adapter during the head-only
+    questions); one that some processes lack a gradient for counts zero there."""
+    import torch.distributed as dist
+
+    device = parameters[0].device
+    found = torch.tensor([p.grad is not None for p in parameters], dtype=torch.int32, device=device)
+    dist.all_reduce(found, op=dist.ReduceOp.MAX)
+    summed = [p for p, f in zip(parameters, found.tolist()) if f]
+    for dtype in sorted({p.dtype for p in summed}, key=str):
+        group = [p for p in summed if p.dtype == dtype]
+        flat = torch.cat([(p.grad if p.grad is not None else torch.zeros_like(p)).reshape(-1) for p in group])
+        dist.all_reduce(flat)
+        for p, part in zip(group, flat.split([p.numel() for p in group])):
+            p.grad = part.view_as(p)
+
+
+def _most(values: list) -> list:
+    """The largest of each value over the processes of the launch; None stays None."""
+    import torch.distributed as dist
+
+    if not dist.is_initialized() or dist.get_world_size() == 1:
+        return list(values)
+    found = torch.tensor([-1.0 if v is None else float(v) for v in values], dtype=torch.float64, device=_device())
+    dist.all_reduce(found, op=dist.ReduceOp.MAX)
+    return [None if v is None else type(v)(f) for v, f in zip(values, found.tolist())]
+
+
+def share_answers(chooser, rows: list, gpus: int) -> list:
+    """_choice.answer of the rows, each process of the launch answering every gpus-th row from its rank, and every
+    process given all the answers in the rows' order."""
+    if gpus == 1:
+        return _choice.answer(chooser, rows)
+    import torch.distributed as dist
+
+    rank = dist.get_rank()
+    parts = [None] * gpus
+    dist.all_gather_object(parts, _choice.answer(chooser, rows[rank::gpus]))
+    found = [None] * len(rows)
+    for r, part in enumerate(parts):
+        found[r::gpus] = part
+    return found
+
+
+def _time_sums(chooser) -> float:
+    """The median seconds of summing the adapter's and the head's gradients among the GPUs, timed TIMED_SUMS
+    times after one to warm up; the gradients are cleared after."""
+    parameters = list(chooser.trainable().values())
+    for p in parameters:
+        p.grad = torch.zeros_like(p)
+    times = []
+    cuda = parameters[0].device.type == "cuda"
+    for i in range(TIMED_SUMS + 1):
+        if cuda:
+            torch.cuda.synchronize()
+        began = time.perf_counter()
+        sum_gradients(parameters)
+        if cuda:
+            torch.cuda.synchronize()
+        if i:
+            times.append(time.perf_counter() - began)
+    for p in parameters:
+        p.grad = None
+    return statistics.median(times)
 
 
 def reuse(job, earlier, reused_from: str = ""):
@@ -434,8 +591,11 @@ def prepare(job, reusing: dict = None, reused_from: str = ""):
     from meepsquared.models import MeepLanguageModel, load_tokenizer
 
     recipe, overrides = job.recipe, job.overrides
-    if int(os.environ.get("WORLD_SIZE", 1)) > 1:
-        raise ValueError("a choice job trains in one process, and this one is one of a launch of several")
+    gpus = gpus_of(job)
+    if reusing is None:
+        join_launch(gpus)
+    elif int(os.environ.get("WORLD_SIZE", 1)) > 1:
+        raise ValueError("a plan from an earlier plan's measurements loads no model, and is made in one process")
     output = job._output(job.model)
     first = {d["name"]: d for d in job._first["decisions"]} if job._first is not None else None
     decisions = []
@@ -485,6 +645,12 @@ def prepare(job, reusing: dict = None, reused_from: str = ""):
         torch.manual_seed(SEED)
         head = _choice.build_head(decoder.config.hidden_size, kind, set_layers, none_output).to(device)
         chooser = _choice.Chooser(peft, decoder, head, kind, per_pass, tokenizer.pad_token_id)
+        if gpus > 1:
+            # The adapter's initial weights are drawn at random on each process: process 0's are every process's
+            import torch.distributed as dist
+
+            for parameter in chooser.trainable().values():
+                dist.broadcast(parameter.data, 0)
         model_name = job.model if isinstance(job.model, str) else str(model.config._name_or_path)
         target_count, cuda = len(targets), device.type == "cuda"
     else:
@@ -530,6 +696,10 @@ def prepare(job, reusing: dict = None, reused_from: str = ""):
 
     # The length, and a start from a saved state
     effective = recipe.effective_batch if recipe.effective_batch is not None else EFFECTIVE_BATCH
+    if effective % gpus:
+        raise ValueError(f"effective_batch {effective} is not shared out evenly among {gpus} GPUs: give a multiple of "
+                         f"{gpus}")
+    each = effective // gpus
     questions = job.steps * effective if job.steps is not None else math.ceil((job.epochs or 1) * len(rows))
     total = math.ceil(questions / effective)
     start, start_step = None, 0
@@ -565,6 +735,12 @@ def prepare(job, reusing: dict = None, reused_from: str = ""):
     max_grad_norm = recipe.max_grad_norm if recipe.max_grad_norm is not None else MAX_GRAD_NORM
     decisions.append(_decide("effective_batch", "batch", recipe.effective_batch, EFFECTIVE_BATCH,
                              lambda n: f"{n} questions per update, one per forward pass", REFERENCE))
+    decisions.append(_decide("gpus", "GPUs", job.gpus, 1,
+                             lambda n: "one" if n == 1 else
+                             f"{n}, each with its own copy of the model: each update's {effective} questions shared "
+                             f"out, {effective // n} to each, and the gradients of the adapter and the head summed "
+                             "among them before the step, the update one GPU makes",
+                             "no gpus given", "as given"))
     decisions.append(Decision("order", "order", "data", "the rows in the order of the data, not shuffled",
                               "the data is written in the order to train"))
     decisions.append(Decision("optimizer", "optimizer", "adamw_torch",
@@ -592,7 +768,7 @@ def prepare(job, reusing: dict = None, reused_from: str = ""):
 
     # The trainer, built only with the model; its arguments are built either way, and say where it reports
     args = {"output_dir": output, "per_device_train_batch_size": 1, "per_device_eval_batch_size": 1,
-            "gradient_accumulation_steps": effective, "max_steps": total, "learning_rate": rate,
+            "gradient_accumulation_steps": each, "max_steps": total, "learning_rate": rate,
             "weight_decay": weight_decay, "max_grad_norm": max_grad_norm, "optim": "adamw_torch", "logging_steps": 1,
             "remove_unused_columns": False, "label_names": [], "train_sampling_strategy": "sequential",
             "bf16": False, "fp16": False, "use_cpu": not cuda, "dataloader_num_workers": 0}
@@ -606,7 +782,7 @@ def prepare(job, reusing: dict = None, reused_from: str = ""):
     training_args = ChoiceArguments(**args)
     settings = {"rows": rows, "eval_rows": eval_rows, "head_only": head_only, "effective_batch": effective,
                 "learning_rate": rate, "head_learning_rate": head_rate, "weight_decay": weight_decay,
-                "warmup_steps": warmup, "config": config, "start": start, "start_step": start_step}
+                "warmup_steps": warmup, "config": config, "start": start, "start_step": start_step, "gpus": gpus}
     trainer = None
     if chooser is not None:
         # One process trains on its one GPU: the Trainer's DataParallel would split a question
@@ -672,19 +848,18 @@ def prepare(job, reusing: dict = None, reused_from: str = ""):
         steps = reusing["steps"]
         per_question = _sessions.on_the_line(steps["median_tokens"], steps["median_seconds"], steps["largest_tokens"],
                                              steps["largest_seconds"], statistics.mean(sizes))
-        seconds_per_step = per_question * effective
+        seconds_per_step = per_question * each + steps["sync_seconds"]
         estimated = seconds_per_step * (total - start_step)
         time_why = (f"{steps['how']}; each question priced on the line through the two at this data's mean, "
-                    f"{statistics.mean(sizes):,.0f} tokens, {effective} questions a step, the adapter training in "
-                    "each")
+                    f"{statistics.mean(sizes):,.0f} tokens, {_shared_text(effective, gpus, steps['sync_seconds'])}")
         memory = reusing["memory"]
         if milestone_rows is not None and milestone_at:
             milestone = reusing.get("milestone")
             if milestone is None or milestone["weights"] != answering_method:
                 raise MeasureAgain(f"the milestones' rows are answered by the {answering_method} weights, and the "
                                    "earlier plan timed no milestone with them")
-            milestone_each = milestone["seconds_per_token"] * sum(map(_choice.tokens_read, milestone_rows))
-            milestone_timing = f"{milestone['how']}, priced by the tokens these rows read"
+            milestone_each = milestone["seconds_per_token"] * sum(map(_choice.tokens_read, milestone_rows)) / gpus
+            milestone_timing = f"{milestone['how']}, priced by the tokens these rows read" + _rows_shared(gpus)
             estimated += milestone_each * len(milestone_at)
         elif reusing.get("milestone") is not None:
             milestone = reusing["milestone"]
@@ -706,32 +881,38 @@ def prepare(job, reusing: dict = None, reused_from: str = ""):
         small = timing
         if sizes[median] != sizes[largest]:
             small = _sessions.time_steps(trainer, median, 1, timed, None, inputs_of)
-        per_question = _sessions.on_the_line(sizes[median], small.step_seconds, sizes[largest], timing.step_seconds,
+        # With several GPUs every one times the same questions at once, and the slowest one's times count
+        largest_seconds, median_seconds, peak_gpu_each, peak_host_each = _most(
+            [timing.step_seconds, small.step_seconds, timing.peak_gpu_bytes, timing.peak_host_bytes])
+        timing = dataclasses.replace(timing, step_seconds=largest_seconds, peak_gpu_bytes=peak_gpu_each,
+                                     peak_host_bytes=peak_host_each)
+        sync = _most([_time_sums(chooser)])[0] if gpus > 1 else 0.0
+        per_question = _sessions.on_the_line(sizes[median], median_seconds, sizes[largest], largest_seconds,
                                              statistics.mean(sizes))
-        seconds_per_step = per_question * effective
+        seconds_per_step = per_question * each + sync
         estimated = seconds_per_step * (total - start_step)
         how = (f"the median of {timed} steps of one question timed after {_sessions.TIMING_WARMUP} to warm up, on the "
                f"question of the most tokens read, {sizes[largest]:,} tokens and {len(rows[largest]['own'])} "
-               f"candidates, and on the median one, {sizes[median]:,} tokens")
+               f"candidates, and on the median one, {sizes[median]:,} tokens"
+               + (f", on each of the {gpus} GPUs at once, the slowest one's" if gpus > 1 else ""))
         time_why = (f"{how}; each question priced on the line through the two at the mean, "
-                    f"{statistics.mean(sizes):,.0f} tokens, {effective} questions a step, the adapter training in "
-                    "each")
-        steps = {"largest_tokens": sizes[largest], "largest_seconds": timing.step_seconds,
-                 "median_tokens": sizes[median], "median_seconds": small.step_seconds, "how": how}
+                    f"{statistics.mean(sizes):,.0f} tokens, {_shared_text(effective, gpus, sync)}")
+        steps = {"largest_tokens": sizes[largest], "largest_seconds": largest_seconds,
+                 "median_tokens": sizes[median], "median_seconds": median_seconds, "sync_seconds": sync, "how": how}
         if milestone_rows is not None and milestone_at:
             sample = milestone_sample(milestone_rows)
             if answering is not None:
                 _choice.copy_trainable(chooser, answering[1])
             began = time.perf_counter()
+            # Each GPU answers the whole sample, timed alone; the rows of a milestone are shared out among them
             _choice.answer(answering[1] if answering is not None else chooser, sample)
+            answered = _most([time.perf_counter() - began])[0]
             sample_tokens = sum(map(_choice.tokens_read, sample))
-            milestone_each = ((time.perf_counter() - began) * sum(map(_choice.tokens_read, milestone_rows))
-                              / sample_tokens)
+            milestone_each = answered * sum(map(_choice.tokens_read, milestone_rows)) / sample_tokens / gpus
             milestone_timing = (f"timed on {len(sample)} of the {len(milestone_rows):,} rows, spread over them, and "
                                 "scaled by the tokens they read" if len(sample) < len(milestone_rows)
-                                else f"timed on its {len(milestone_rows)} rows")
-            milestone = {"weights": answering_method,
-                         "seconds_per_token": milestone_each / sum(map(_choice.tokens_read, milestone_rows)),
+                                else f"timed on its {len(milestone_rows)} rows") + _rows_shared(gpus)
+            milestone = {"weights": answering_method, "seconds_per_token": answered / sample_tokens,
                          "how": f"timed on {len(sample)} rows of {sample_tokens:,} tokens"}
             estimated += milestone_each * len(milestone_at)
     if job.milestones is not None:
@@ -760,6 +941,8 @@ def prepare(job, reusing: dict = None, reused_from: str = ""):
                   "the host: the process's peak resident memory, loading included")
     if timing is not None:
         request, request_why = _sessions.memory_request(timing)
+        if gpus > 1:
+            request, request_why = request * gpus, f"{request_why}, for each of the {gpus} processes"
         memory = {"peak_gpu_bytes": timing.peak_gpu_bytes, "peak_host_bytes": timing.peak_host_bytes,
                   "request": request, "why": request_why}
     if memory is None:
@@ -769,8 +952,9 @@ def prepare(job, reusing: dict = None, reused_from: str = ""):
         peak_gpu, peak_host, request = memory["peak_gpu_bytes"], memory["peak_host_bytes"], memory["request"]
         decisions.append(Decision("memory", "memory", {"peak_gpu_bytes": peak_gpu, "peak_host_bytes": peak_host,
                                                        "memory_request_bytes": request},
-                                  (f"peak {_gib(peak_gpu)} on the GPU, " if peak_gpu is not None else "")
-                                  + f"{_gib(peak_host)} on the host; a job should ask for {request // 2**30} GiB "
+                                  (f"peak {_gib(peak_gpu)} on {'each' if gpus > 1 else 'the'} GPU, "
+                                   if peak_gpu is not None else "")
+                                  + f"{_gib(peak_host)} on the host{' for each process' if gpus > 1 else ''}; a job should ask for {request // 2**30} GiB "
                                     f"({memory['why']})", memory_why))
 
     # What was measured, kept for a later plan to reuse; or what this one reused

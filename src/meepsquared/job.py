@@ -617,7 +617,11 @@ class Result:
             if merged:
                 raise ValueError("a chooser is saved as its adapter and head on the base model; merged=True is for a "
                                  "language model alone")
-            _choice.save(self._model, path, choice, tokenizer=self._tokenizer)
+            # In a launch of several processes, each holds the same adapter and head, and the first one writes
+            from meepsquared import _sessions
+
+            if _sessions.main_process():
+                _choice.save(self._model, path, choice, tokenizer=self._tokenizer)
             return
         tagger = getattr(self._model, "_meepsquared", {}).get("tagger")
         if tagger is not None:
@@ -787,6 +791,12 @@ class TrainingJob:
         milestone the adapter and the head are copied into it and answer.
         "qlora" counts the answers of the NF4 base a 24 GB GPU serves while
         the training runs in another format. Needs milestone_eval.
+    gpus: choice only, the GPUs the training runs on, each holding its own
+        copy of the model, in a launch of that many processes (torchrun
+        --nproc_per_node); each update's questions are shared out among them
+        and their gradients summed before the optimizer step, so the update
+        is the one a single GPU makes. effective_batch must be a multiple of
+        it. One GPU when not given.
     recipe, overrides: see Recipe and Overrides.
     """
 
@@ -813,6 +823,7 @@ class TrainingJob:
     preprocessed: Any = None
     start_from: Any = None
     milestone_weights: Optional[str] = None
+    gpus: Optional[int] = None
     recipe: Recipe = field(default_factory=Recipe)
     overrides: Overrides = field(default_factory=Overrides)
     _prepared: Optional[_Prepared] = field(default=None, init=False, repr=False, compare=False)
@@ -840,6 +851,8 @@ class TrainingJob:
                 raise ValueError("start_from is a choice setting")
             if self.milestone_weights is not None:
                 raise ValueError("milestone_weights is a choice setting")
+            if self.gpus is not None:
+                raise ValueError("gpus is a choice setting; an SFT job runs on the GPUs of its launch (torchrun)")
         if self.task == "choice":
             self._check_choice()
         if self.task == "tagging":
@@ -952,6 +965,8 @@ class TrainingJob:
         for name in NOT_CHOICE_RECIPE:
             if getattr(self.recipe, name) is not None:
                 raise ValueError(f"recipe.{name} is not a choice setting")
+        if self.gpus is not None and (isinstance(self.gpus, bool) or not isinstance(self.gpus, int) or self.gpus < 1):
+            raise ValueError(f"gpus is a whole number of GPUs, 1 or more, not {self.gpus!r}")
         if self.start_from is not None and not isinstance(self.start_from, (str, os.PathLike)):
             raise ValueError(f"start_from must be the path of a .pt file, not {type(self.start_from).__name__}")
         if self.milestone_weights is not None:
@@ -1040,7 +1055,7 @@ class TrainingJob:
                "preprocessed": str(self.preprocessed) if self.preprocessed is not None else None,
                "milestone_eval": str(self.milestone_eval) if self.milestone_eval is not None else None,
                "start_from": str(self.start_from) if self.start_from is not None else None,
-               "milestone_weights": self.milestone_weights,
+               "milestone_weights": self.milestone_weights, "gpus": self.gpus,
                "milestone_scorer": (reward_name(self.milestone_scorer, "milestone_scorer")
                                     if self.milestone_scorer is not None else None),
                "recipe": self.recipe.to_dict() or None,
@@ -1238,7 +1253,7 @@ class TrainingJob:
                                                 prepared.milestone_scorer, status=status, report=report,
                                                 engine=getattr(prepared.model, "_meepsquared", {}).get("engine"))
             trainer.add_callback(milestones)
-        if os.environ.get("MEEPSQUARED_QUIET") != "1":
+        if os.environ.get("MEEPSQUARED_QUIET") != "1" and _sessions.main_process():
             print(prepared.plan, flush=True)
         device = next(prepared.model.parameters()).device
         on_gpu = device.type == "cuda"
@@ -2311,7 +2326,7 @@ TIMING_ATTEMPTS = 10
 RESUMED = ("micro_batch", "checkpointed_layers", "selective_layers", "duration", "memory", "milestones")
 
 # The order of the plan's lines: how the model runs, then how it learns, then what it learns from
-ORDER = ["loading", "allocator_cap", "weights", "attention", "padding_free", "liger", "fused_lora", "compile_layers",
+ORDER = ["gpus", "loading", "allocator_cap", "weights", "attention", "padding_free", "liger", "fused_lora", "compile_layers",
          "checkpointed_layers", "selective_layers", "allocator", "vllm", "tokens_per_update", "effective_batch",
          "micro_batch",
          "accumulation", "order", "rank",

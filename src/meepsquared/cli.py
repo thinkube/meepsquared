@@ -85,16 +85,22 @@ def _train(args) -> int:
     if args.status_file is not None and _sessions.main_process():
         _sessions.Status(args.status_file).update()
     job = TrainingJob.from_yaml(args.job)
+    # In a launch of several processes each makes the plan, and the first one prints it
     if args.plan_only:
         plan = job.plan()
-        print(json.dumps(plan.to_dict(), indent=2) if args.json else plan, flush=True)
+        if _sessions.main_process():
+            print(json.dumps(plan.to_dict(), indent=2) if args.json else plan, flush=True)
         return 0
     if args.json:
-        print(json.dumps({"plan": job.plan().to_dict()}), flush=True)
+        plan = job.plan()
+        if _sessions.main_process():
+            print(json.dumps({"plan": plan.to_dict()}), flush=True)
     result = job.train(resume=args.resume, stop_file=args.stop_file, status_file=args.status_file,
                        stop_on_sigterm=True)
     if not result.paused:
         result.save(result.output)
+    if not _sessions.main_process():
+        return PAUSED if result.paused else 0
     if args.json:
         print(json.dumps({"result": result.to_dict()}), flush=True)
     elif result.paused:
