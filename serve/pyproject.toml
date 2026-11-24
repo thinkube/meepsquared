@@ -12,7 +12,8 @@ authors = [{ name = "Alejandro Martínez Corriá and the Thinkube contributors" 
 requires-python = ">=3.12"
 # torch comes from the environment (the serving image, or PyTorch's wheel), as for Meep²
 dependencies = [
-    "transformers==5.20.2",
+    # A range, not one version: the serving images carry their own Transformers
+    "transformers>=5.19,<6",
     "numpy>=1.26",
     "safetensors>=0.4",
 ]
