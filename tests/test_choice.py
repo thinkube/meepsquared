@@ -354,7 +354,7 @@ def test_a_plan_measures_again_when_what_the_measurements_depend_on_changed(toke
         make_job(tokenizer, tmp_path, report_to=[],
                  recipe={"choice_head": "scalar", "candidates_per_pass": 2}).plan(reuse=earlier)
     longer = rows()
-    longer[3] = {**longer[3], "prompt": "the sloth sleeps and the hare runs and the sloth sleeps again "}
+    longer[3] = {**longer[3], "prompt": "the sloth sleeps and the hare " * 6}
     with pytest.raises(m2.MeasureAgain, match="longest question reads"):
         make_job(tokenizer, tmp_path, data=write(tmp_path / "longer.jsonl", longer),
                  report_to=[]).plan(reuse=earlier)
