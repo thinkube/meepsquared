@@ -578,6 +578,8 @@ class Plan:
         if growth is not None and milestones is None:
             raise ValueError("milestone_growth: no milestones; give milestones, the share of the planned steps "
                              "before the first milestone")
+        if milestones is not None and not basis["milestones_what"]:
+            raise ValueError("this plan placed no milestones, so it measured none: plan the job again")
         planned, start = basis["planned_steps"], basis["start_step"]
         each = basis["milestone_seconds"]
         decisions = [d for d in self.decisions if d.name not in ("milestones", "duration", "revised")]

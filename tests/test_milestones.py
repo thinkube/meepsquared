@@ -217,6 +217,14 @@ def test_a_plan_without_a_revision_basis_is_planned_again():
         plan.with_milestones(0.1, None)
 
 
+def test_a_plan_that_placed_no_milestones_measured_none_and_is_planned_again():
+    plan = plan_with_basis()
+    plan.revision_basis = {**plan.revision_basis, "milestones_what": "", "milestone_seconds": None}
+    with pytest.raises(ValueError, match="placed no milestones"):
+        plan.with_milestones(0.1, None)
+    assert plan.with_milestones(None, None)["milestones"].text == "none"
+
+
 def test_a_milestone_is_timed_on_rows_spread_over_the_set():
     from meepsquared import _choice_job
 
