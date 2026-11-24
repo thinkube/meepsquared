@@ -384,7 +384,10 @@ class TaggerPart:
         return found
 
     def close(self) -> None:
-        """The part's adapters removed from its engine; the part answers no more."""
+        """The part's adapters removed from its engine; the part answers no more. A closed part refuses to close
+        again: its name may be another part's by then."""
+        if self.heads is None:
+            raise PartError(f"the part {self.name} is closed already")
         self.engine.remove_bottlenecks(self.name)
         self.heads = None
 
@@ -399,6 +402,8 @@ class TaggerPart:
     def answer(self, request: dict) -> dict:
         """{"texts": [...]} -> {"words": [[...], ...]} for a splitter; {"sentences": [[...], ...], "probabilities":
         [head, ...], "decode": "argmax" (default) or "mst"} -> {"sentences": [{...}, ...]} for any other tagger."""
+        if self.heads is None:
+            raise PartError(f"the part {self.name} is closed")
         given = {k: v for k, v in request.items() if k != "model"}
         if self.splitter:
             unknown = sorted(set(given) - {"texts"})

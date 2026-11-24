@@ -195,5 +195,7 @@ def test_a_closed_part_leaves_the_base_to_the_others(base, tmp_path):
     assert engine.names() == ["b"] and b.answer(request) == before
     # Its name is free again: the same part loads on the same engine
     assert meepserve.load(first, engine=engine).answer(request) == meepserve.load(first, base, device="cpu").answer(request)
-    with pytest.raises(ValueError, match="no adapters named a"):
+    with pytest.raises(PartError, match="closed already"):
         a.close()
+    with pytest.raises(PartError, match="is closed"):
+        a.answer(request)
