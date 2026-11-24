@@ -17,12 +17,18 @@ import torch.multiprocessing as mp
 import meepsquared as m2
 from meepsquared import _choice_job
 
+from conftest import CHATML
 from test_choice import make_job, rows, write
 
 # Four questions an update; the first three train the head alone. Shared out between two processes, the first one
 # reads questions 0 and 2 of the first update, both head-only, and has no gradient of the adapter at its step; the
 # second one reads 1 and 3, and question 3 trains the adapter.
 RECIPE = {"effective_batch": 4, "head_only": 3}
+
+
+@pytest.fixture
+def tokenizer(chat_tokenizer):
+    return chat_tokenizer(CHATML)
 
 
 def free_port() -> int:
