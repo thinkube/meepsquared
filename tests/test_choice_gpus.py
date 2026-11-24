@@ -75,9 +75,12 @@ def test_two_processes_make_the_updates_one_makes(tokenizer, tmp_path):
     assert json.loads((tmp_path / "losses.json").read_text()) == pytest.approx(one_losses, rel=1e-4)
     two = torch.load(tmp_path / "trained.pt")
     assert set(two) == set(one)
+    # The gradients are summed in another order, and Adam divides each by its own size: a weight whose gradient is
+    # near zero moves by a rounding's share of a step. A step moves a weight by up to the learning rate, 1e-2; a
+    # question's gradient left out would move the weights by that much.
     for name in one:
         largest = float((two[name] - one[name]).abs().max())
-        assert torch.allclose(two[name], one[name], rtol=1e-4, atol=1e-5), f"{name}: differs by up to {largest:.3g}"
+        assert largest < 1e-3, f"{name}: differs by up to {largest:.3g}"
     plan = {d["name"]: d for d in json.loads((tmp_path / "plan.json").read_text())["decisions"]}
     assert plan["gpus"]["value"] == 2 and "2 to each" in plan["gpus"]["text"]
     assert "2 on each of the 2 GPUs at once" in plan["duration"]["reason"]
