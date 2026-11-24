@@ -738,6 +738,12 @@ class TrainingJob:
         meepsquared, to go on from (see meepsquared._choice.read_start); a
         resumed session goes on from its checkpoint, and start_from only says
         where the training began.
+    milestone_weights: choice only, the method whose weights answer the
+        milestones' rows ("lora", "qlora", "fp8" or "nvfp4"), when it is not
+        the training's: a second copy of the base is loaded so, and at each
+        milestone the adapter and the head are copied into it and answer.
+        "qlora" counts the answers of the NF4 base a 24 GB GPU serves while
+        the training runs in another format. Needs milestone_eval.
     recipe, overrides: see Recipe and Overrides.
     """
 
@@ -762,6 +768,7 @@ class TrainingJob:
     tokenizer: Any = None
     preprocessed: Any = None
     start_from: Any = None
+    milestone_weights: Optional[str] = None
     recipe: Recipe = field(default_factory=Recipe)
     overrides: Overrides = field(default_factory=Overrides)
     _prepared: Optional[_Prepared] = field(default=None, init=False, repr=False, compare=False)
@@ -787,6 +794,8 @@ class TrainingJob:
                 raise ValueError("schedule 'ramped_linear' is a choice job's")
             if self.start_from is not None:
                 raise ValueError("start_from is a choice setting")
+            if self.milestone_weights is not None:
+                raise ValueError("milestone_weights is a choice setting")
         if self.task == "choice":
             self._check_choice()
         if self.task == "tagging":
@@ -893,6 +902,14 @@ class TrainingJob:
                 raise ValueError(f"recipe.{name} is not a choice setting")
         if self.start_from is not None and not isinstance(self.start_from, (str, os.PathLike)):
             raise ValueError(f"start_from must be the path of a .pt file, not {type(self.start_from).__name__}")
+        if self.milestone_weights is not None:
+            if self.milestone_weights not in CHOICE_METHODS:
+                raise ValueError(f"milestone_weights is one of {list(CHOICE_METHODS)}, not {self.milestone_weights!r}")
+            if self.milestone_eval is None:
+                raise ValueError("milestone_weights says which weights answer milestone_eval's rows; give "
+                                 "milestones and milestone_eval")
+            if not isinstance(self.model, (str, os.PathLike)):
+                raise ValueError("milestone_weights loads a second copy of the base: give model as an id or a path")
         if isinstance(self.model, str) and self.tokenizer is not None:
             raise ValueError("tokenizer is for a loaded model; with a model id or path meepsquared loads its tokenizer")
         if not isinstance(self.model, str) and self.tokenizer is None:
@@ -970,6 +987,7 @@ class TrainingJob:
                "preprocessed": str(self.preprocessed) if self.preprocessed is not None else None,
                "milestone_eval": str(self.milestone_eval) if self.milestone_eval is not None else None,
                "start_from": str(self.start_from) if self.start_from is not None else None,
+               "milestone_weights": self.milestone_weights,
                "milestone_scorer": (reward_name(self.milestone_scorer, "milestone_scorer")
                                     if self.milestone_scorer is not None else None),
                "recipe": self.recipe.to_dict() or None,
@@ -1071,7 +1089,8 @@ class TrainingJob:
 
             milestones = _choice_job.ChoiceMilestones(trainer, output, prepared.milestones, prepared.milestone_rows,
                                                       prepared.choice["config"], prepared.choice["earlier"],
-                                                      status=status, report=report)
+                                                      status=status, report=report,
+                                                      answering=prepared.choice.get("answering"))
             trainer.add_callback(milestones)
         elif prepared.milestones is not None:
             # After Report: the time of a milestone is taken out of the steps'
@@ -2147,7 +2166,7 @@ ORDER = ["loading", "allocator_cap", "weights", "attention", "padding_free", "li
          "micro_batch",
          "accumulation", "order", "rank",
          "alpha", "dropout", "targets", "experts", "optimizer", "learning_rate", "schedule", "warmup_steps",
-         "max_grad_norm", "weight_decay", "length", "duration", "memory", "evaluation", "milestones", "milestone_engine",
+         "max_grad_norm", "weight_decay", "length", "duration", "memory", "evaluation", "milestones", "milestone_weights", "milestone_engine",
          "data_checks",
          "source_weights", "max_length", "answers_only", "labels", "words", "bottleneck", "head_dropout", "keep",
          "decode", "choice_head", "candidates_per_pass", "head_learning_rate", "head_only", "start_from",

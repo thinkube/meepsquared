@@ -395,3 +395,29 @@ def test_qlora_quantizes_as_the_reference_training_did(monkeypatch):
     # SFT's QLoRA keeps double quantization
     assert models.four_bit_config(torch.bfloat16).bnb_4bit_use_double_quant is True
 
+
+
+def test_milestone_weights_is_a_choice_setting_with_rows_to_answer():
+    with pytest.raises(ValueError, match="milestone_weights is a choice setting"):
+        TrainingJob(model="x", data="d.jsonl", milestone_weights="qlora")
+    with pytest.raises(ValueError, match="milestone_weights is one of"):
+        TrainingJob(model="x", task="choice", data="d.jsonl", milestones=0.5, milestone_eval="m.jsonl",
+                    milestone_weights="int8")
+    with pytest.raises(ValueError, match="give milestones and milestone_eval"):
+        TrainingJob(model="x", task="choice", data="d.jsonl", milestone_weights="qlora")
+    job = TrainingJob(model="x", task="choice", method="nvfp4", data="d.jsonl", milestones=0.5,
+                      milestone_eval="m.jsonl", milestone_weights="qlora")
+    assert TrainingJob.from_dict(job.to_dict()).milestone_weights == "qlora"
+
+
+def test_a_second_chooser_answers_as_the_trained_one_once_its_adapter_and_head_are_copied(tokenizer, tmp_path):
+    trained, other = chooser_of(tokenizer), chooser_of(tokenizer)
+    torch.manual_seed(1)
+    with torch.no_grad():
+        for p in trained.trainable().values():
+            p.add_(torch.randn_like(p) * 0.3)
+    found, _ = _choice.read_encoded(write(tmp_path / "key.jsonl", rows()), tokenizer, "milestone_eval",
+                                    target=False, right=True)
+    assert _choice.answer(other, found) != _choice.answer(trained, found)
+    _choice.copy_trainable(trained, other)
+    assert _choice.answer(other, found) == _choice.answer(trained, found)

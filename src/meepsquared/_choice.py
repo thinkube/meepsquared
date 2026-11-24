@@ -352,6 +352,17 @@ def answer(chooser: Chooser, rows: list) -> list:
     return found
 
 
+def copy_trainable(source: Chooser, target: Chooser) -> None:
+    """The adapter and the head of source copied into target, by name: target answers as source would on its own
+    base weights. Every name must be in both."""
+    have, into = source.trainable(), target.trainable()
+    if set(have) != set(into):
+        raise ValueError(f"the two choosers differ in what trains: {sorted(set(have) ^ set(into))[:4]}")
+    with torch.no_grad():
+        for name, value in have.items():
+            into[name].copy_(value.to(device=into[name].device, dtype=into[name].dtype))
+
+
 def score(rows: list, found: list) -> dict:
     """{group: {"right": count, "of": rows}}: how many rows' top candidate is a right one, by group ("all" when the
     rows have none)."""

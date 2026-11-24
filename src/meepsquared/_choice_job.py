@@ -208,9 +208,12 @@ class ChoiceMilestones(_milestones.Milestones):
     and logged as milestone/<group>/right and milestone/<group>/of. earlier: the milestone records of a start_from
     state, listed before this training's."""
 
-    def __init__(self, trainer, output, at: list, found, config: dict, earlier: list, status=None, report=None):
+    def __init__(self, trainer, output, at: list, found, config: dict, earlier: list, status=None, report=None,
+                 answering=None):
         super().__init__(trainer, output, at, found, None, status=status, report=report)
         self.config, self.earlier = config, list(earlier)
+        # (method, chooser): the second copy of the base that answers the rows (TrainingJob.milestone_weights)
+        self.answering = answering
 
     def records(self) -> list:
         return self.earlier + super().records()
@@ -228,7 +231,12 @@ class ChoiceMilestones(_milestones.Milestones):
         parts = {"saving": round(time.perf_counter() - began, 1)}
         record = {"step": step, "planned_steps": state.max_steps, "folder": str(final)}
         if self.found is not None:
-            found = _choice.answer(chooser, self.found)
+            answerer = chooser
+            if self.answering is not None:
+                method, answerer = self.answering
+                _choice.copy_trainable(chooser, answerer)
+                record["weights"] = method
+            found = _choice.answer(answerer, self.found)
             with (partial / _choice.ANSWERS).open("w") as f:
                 for row, (best, probability) in zip(self.found, found):
                     f.write(json.dumps({"group": row.get("group") or _choice.GROUP, "chosen": best,
@@ -301,6 +309,33 @@ def _load(job, decisions: list):
     decisions.append(_decide("attention", "attention", overrides.attention, ATTENTION, str,
                              "the candidates are read after the shared cache, right-padded, with a mask"))
     return model
+
+
+def attention_of(job) -> str:
+    return job.overrides.attention if job.overrides.attention is not None else ATTENTION
+
+
+def _answering_chooser(job, method: str, attention: str, rank: int, alpha: int, names: list, kind: str,
+                       per_pass: int, pad_id: int):
+    """A second copy of the base loaded as `method`, with the same adapter's shape and head, frozen, in evaluation
+    mode: the milestones' rows are answered on it once the training's adapter and head are copied in."""
+    from meepsquared.models import MeepLanguageModel
+
+    four_bit = {"dtype": QLORA_DTYPE, "double_quant": QLORA_DOUBLE_QUANT} if method == "qlora" else {}
+    model, _ = MeepLanguageModel.from_pretrained(job.model, load_in_4bit=method == "qlora",
+                                                 load_in_fp8=method == "fp8", load_in_nvfp4=method == "nvfp4",
+                                                 liger=False, attn_implementation=attention, **four_bit)
+    for p in model.parameters():
+        p.requires_grad_(False)
+    peft = MeepLanguageModel.get_peft_model(model, r=rank, lora_alpha=alpha, lora_dropout=0.0,
+                                            target_modules=_language_model_targets(model, names),
+                                            use_gradient_checkpointing=False, fused_lora=False, compile_layers=False)
+    decoder = peft.get_base_model().get_decoder()
+    head = _choice.build_head(decoder.config.hidden_size, kind).to(next(decoder.parameters()).device)
+    answering = _choice.Chooser(peft, decoder, head, kind, per_pass, pad_id)
+    for p in answering.parameters():
+        p.requires_grad_(False)
+    return answering.eval()
 
 
 def prepare(job):
@@ -495,7 +530,20 @@ def prepare(job):
                               "as given" if job.report_to is not None else "Transformers' default"))
     decisions.append(Decision("allocator", "allocator", _allocator.DECISION, _allocator.DECISION))
 
-    # The milestones
+    # The milestones, and the weights that answer them
+    answering = None
+    if job.milestone_weights is not None and job.milestone_weights != job.method:
+        answering = (job.milestone_weights,
+                     _answering_chooser(job, job.milestone_weights, attention_of(job), rank, alpha, names, kind,
+                                        per_pass, tokenizer.pad_token_id))
+        decisions.append(Decision("milestone_weights", "milestone weights", job.milestone_weights,
+                                  f"a second copy of the base loaded as {job.milestone_weights} answers the "
+                                  "milestones' rows, the adapter and the head copied into it at each milestone",
+                                  "as given: the answers of the weights the model will be served on"))
+    elif job.milestones is not None and job.milestone_eval is not None:
+        decisions.append(Decision("milestone_weights", "milestone weights", job.method,
+                                  f"the training's own weights ({job.method}) answer the milestones' rows",
+                                  "as given" if job.milestone_weights is not None else "no milestone_weights given"))
     milestone_at = milestone_rows = None
     if job.milestones is not None:
         milestone_at = [s for s in _milestones.steps(total, job.milestones) if s > start_step]
@@ -538,7 +586,9 @@ def prepare(job):
                     f"tokens, {effective} questions a step, the adapter training in each")
         if milestone_rows is not None and milestone_at:
             began = time.perf_counter()
-            _choice.answer(chooser, milestone_rows)
+            if answering is not None:
+                _choice.copy_trainable(chooser, answering[1])
+            _choice.answer(answering[1] if answering is not None else chooser, milestone_rows)
             milestone_each = time.perf_counter() - began
             estimated += milestone_each * len(milestone_at)
     if job.milestones is not None:
@@ -587,5 +637,6 @@ def prepare(job):
                 peak_gpu_bytes=peak_gpu, peak_host_bytes=peak_host, memory_request_bytes=request)
     prepared = _Prepared(chooser, tokenizer, trainer, plan, output, milestones=milestone_at,
                          milestone_rows=milestone_rows)
-    prepared.choice = {"config": config, "earlier": start["milestones"] if start is not None else []}
+    prepared.choice = {"config": config, "earlier": start["milestones"] if start is not None else [],
+                       "answering": answering}
     return prepared
