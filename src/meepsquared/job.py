@@ -41,7 +41,7 @@ METHOD_NAMES = {"lora": "LoRA", "qlora": "QLoRA", "fp8": "LoRA on FP8 weights", 
 TAGGING_METHODS = ("lora", "bottleneck")
 SCHEDULES = ("constant", "cosine", "linear", "ramped_linear")
 # The methods of a choice job (see meepsquared._choice_job)
-CHOICE_METHODS = ("lora", "qlora")
+CHOICE_METHODS = ("lora", "qlora", "fp8")
 # The Recipe fields of a choice job alone
 CHOICE_RECIPE = ("choice_head", "head_learning_rate", "candidates_per_pass", "head_only")
 # The Recipe fields a choice job refuses

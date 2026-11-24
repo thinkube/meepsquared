@@ -275,7 +275,8 @@ def _load(job, decisions: list):
             raise ValueError("model already has adapters; give it without them, and the job adds LoRA")
         if overrides.attention is not None:
             raise ValueError("overrides.attention is a loading choice, and the model is loaded already")
-        loaded_as = "qlora" if getattr(model, "is_loaded_in_4bit", False) else "lora"
+        loaded_as = ("qlora" if getattr(model, "is_loaded_in_4bit", False)
+                     else "fp8" if model._meepsquared.get("fp8", False) else "lora")
         if loaded_as != job.method:
             raise ValueError(f"method={job.method!r}, and the model was loaded for {loaded_as!r}")
         decisions.append(Decision("loading", "loading", "given", "the model as given, loaded by the caller"))
@@ -284,7 +285,8 @@ def _load(job, decisions: list):
         return model
     attention = overrides.attention if overrides.attention is not None else ATTENTION
     four_bit = {"dtype": QLORA_DTYPE, "double_quant": QLORA_DOUBLE_QUANT} if job.method == "qlora" else {}
-    model, _ = MeepLanguageModel.from_pretrained(job.model, load_in_4bit=job.method == "qlora", liger=False,
+    model, _ = MeepLanguageModel.from_pretrained(job.model, load_in_4bit=job.method == "qlora",
+                                                 load_in_fp8=job.method == "fp8", liger=False,
                                                  attn_implementation=attention, **four_bit)
     device = next(model.parameters()).device
     decisions.append(Decision("loading", "loading", "whole", f"to {device}", "as an SFT job loads it, without Liger: "
@@ -333,6 +335,12 @@ def prepare(job):
         decisions.append(Decision("weights", "weights", job.method,
                                   f"4-bit NF4 without double quantization, computing in {dtype_name}{experts}; the "
                                   "head in float32", "the quantization the reference training used"))
+    elif job.method == "fp8":
+        decisions.append(Decision("weights", "weights", job.method,
+                                  f"the frozen linear layers of the decoder in FP8 (e4m3, one scale per tensor), their "
+                                  f"products on the FP8 tensor cores, computing in {dtype_name}; the head in float32",
+                                  "method fp8 (see meepsquared._fp8); the adapters, embeddings, norms and routers stay "
+                                  f"in {dtype_name}"))
     else:
         decisions.append(Decision("weights", "weights", job.method, dtype_name,
                                   f"method {job.method}; the head in float32"))

@@ -342,7 +342,7 @@ def test_the_command_trains_a_choice_job_with_its_status(tokenizer, tmp_path, mo
 
 def test_a_choice_job_refuses_other_tasks_settings_and_others_refuse_its():
     with pytest.raises(ValueError, match="a choice job trains"):
-        TrainingJob(model="x", task="choice", method="fp8", data="d.jsonl")
+        TrainingJob(model="x", task="choice", method="bottleneck", data="d.jsonl")
     with pytest.raises(ValueError, match="milestone_scorer"):
         TrainingJob(model="x", task="choice", data="d.jsonl", milestones=0.5, milestone_eval="m.jsonl",
                     milestone_scorer="m:f")
@@ -394,3 +394,22 @@ def test_qlora_quantizes_as_the_reference_training_did(monkeypatch):
     assert config.bnb_4bit_use_double_quant is False
     # SFT's QLoRA keeps double quantization
     assert models.four_bit_config(torch.bfloat16).bnb_4bit_use_double_quant is True
+
+
+def test_fp8_loads_the_frozen_layers_for_fp8(monkeypatch):
+    from meepsquared import models
+
+    seen = {}
+
+    class Loaded(Exception):
+        pass
+
+    def from_pretrained(name, **kwargs):
+        seen.update(kwargs)
+        raise Loaded
+
+    monkeypatch.setattr(models.MeepLanguageModel, "from_pretrained", staticmethod(from_pretrained))
+    job = TrainingJob(model="org/model", task="choice", method="fp8", data="d.jsonl")
+    with pytest.raises(Loaded):
+        _choice_job._load(job, [])
+    assert seen["load_in_fp8"] and not seen["load_in_4bit"] and "double_quant" not in seen
