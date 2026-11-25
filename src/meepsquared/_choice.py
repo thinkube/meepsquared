@@ -310,6 +310,24 @@ def choose(head: nn.ModuleDict, z: torch.Tensor, states: torch.Tensor, none: Opt
     return keep[best], (1 - p_none) * float(p[best])
 
 
+def probabilities(head: nn.ModuleDict, z: torch.Tensor, states: torch.Tensor, none: Optional[int]) -> list:
+    """Each candidate's probability, as choose weighs them. Without a none output: the softmax. With it: the none
+    candidate's is the none output's probability, and each other's its softmax among them times the probability
+    that one applies."""
+    if "none_output" not in head:
+        return [float(x) for x in z.float().softmax(-1)]
+    if none is None:
+        raise ValueError("the head has a none output, and the question names no none candidate")
+    p_none = float(torch.sigmoid(none_logit(head, states, none)))
+    keep = [i for i in range(len(z)) if i != none]
+    p = z[keep].float().softmax(-1)
+    out = [0.0] * len(z)
+    out[none] = p_none
+    for i, x in zip(keep, p):
+        out[i] = (1 - p_none) * float(x)
+    return out
+
+
 class Chooser(nn.Module):
     """The language model with its adapter (a PEFT model), its decoder, and the head.
 
@@ -424,8 +442,8 @@ class Chooser(nn.Module):
 
 
 def answer(chooser: Chooser, rows: list) -> list:
-    """(the top candidate, its probability) of each encoded row, the model in evaluation mode and without gradients;
-    its mode is put back after."""
+    """(the top candidate, its probability, every candidate's probability) of each encoded row, the model in
+    evaluation mode and without gradients; its mode is put back after."""
     training = chooser.training
     chooser.eval()
     found = []
@@ -433,7 +451,8 @@ def answer(chooser: Chooser, rows: list) -> list:
         with torch.no_grad():
             for row in rows:
                 z, states = chooser.outputs(row["shared"], row["own"], grad=False)
-                found.append(choose(chooser.head, z, states, row.get("none")))
+                best, probability = choose(chooser.head, z, states, row.get("none"))
+                found.append((best, probability, probabilities(chooser.head, z, states, row.get("none"))))
     finally:
         chooser.train(training)
     return found
@@ -454,7 +473,7 @@ def score(rows: list, found: list) -> dict:
     """{group: {"right": count, "of": rows}}: how many rows' top candidate is a right one, by group ("all" when the
     rows have none)."""
     groups = {}
-    for row, (best, _) in zip(rows, found):
+    for row, (best, *_) in zip(rows, found):
         counts = groups.setdefault(row.get("group") or GROUP, {"right": 0, "of": 0})
         counts["right"] += int(bool(row["right"][best]))
         counts["of"] += 1

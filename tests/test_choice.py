@@ -543,6 +543,9 @@ def test_the_none_output_learns_the_none_mass_and_the_rest_the_choice_among_the_
         head["none_output"].bias.fill_(-2.0)
     best, probability = _choice.choose(head, z, states, 3)
     assert best != 3 and probability < 1 - float(torch.sigmoid(torch.tensor(-2.0))) + 1e-6
+    every = _choice.probabilities(head, z, states, 3)
+    assert sum(every) == pytest.approx(1.0) and every[best] == pytest.approx(probability)
+    assert every[3] == pytest.approx(float(torch.sigmoid(_choice.none_logit(head, states, 3))))
     with pytest.raises(ValueError, match="none_output must be True or False"):
         m2.Recipe(none_output="yes")
 
@@ -554,3 +557,13 @@ def test_a_job_with_the_none_output_needs_every_row_to_name_its_none_candidate(t
     plan = make_job(tokenizer, tmp_path, output="named", data=write(tmp_path / "named.jsonl", named),
                     recipe={"none_output": True}).plan()
     assert plan["none_output"].value is True
+
+
+def test_every_candidates_probability_is_the_softmax_and_the_chosen_one_is_its_top():
+    torch.manual_seed(0)
+    head = _choice.build_head(32, "set")
+    z, states = _choice.outputs(head, torch.randn(5, 32))
+    every = _choice.probabilities(head, z, states, None)
+    best, probability = _choice.choose(head, z, states, None)
+    assert len(every) == 5 and sum(every) == pytest.approx(1.0)
+    assert max(range(5), key=every.__getitem__) == best and every[best] == pytest.approx(probability)

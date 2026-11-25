@@ -74,7 +74,15 @@ The trainer logs `loss`, `learning_rate` (the adapter's) and `grad_norm` at ever
 
 == Milestones
 
-`milestones` is the share of the planned steps between milestones; there is always one at the last step. At each milestone, `<output>/milestones/step-<N>` keeps the adapter, `head.safetensors` and `choice.json`. With `milestone_eval`, each row's top candidate is chosen (the model in evaluation mode, no gradients). The answers go to `answers.jsonl`, and `milestone.json` records the count of right answers per group:
+`milestones` is the share of the planned steps between milestones; there is always one at the last step. At each milestone, `<output>/milestones/step-<N>` keeps the adapter, `head.safetensors` and `choice.json`. With `milestone_eval`, each row's top candidate is chosen (the model in evaluation mode, no gradients). The answers go to `answers.jsonl`, one line per row: its group, the chosen candidate, that candidate's probability, whether it is right, and every candidate's probability in the row's order (with a none output: the none candidate's is the none output's, and each other's its share of the rest):
+
+[source,json]
+----
+{"group": "corpus", "chosen": 2, "probability": 0.849874, "right": true,
+ "probabilities": [0.021, 0.0874, 0.849874, 0.0, 0.041726]}
+----
+
+`milestone.json` records the count of right answers per group:
 
 [source,json]
 ----

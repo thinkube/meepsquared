@@ -253,7 +253,8 @@ class ChoiceTrainer(Trainer):
 
 class ChoiceMilestones(_milestones.Milestones):
     """At the end of each milestone's step: the adapter and the head saved apart in <output>/milestones/step-<N> and,
-    with rows, each row's top candidate (ANSWERS) and the count of right ones by group, recorded in milestone.json
+    with rows, each row's top candidate and every candidate's probability (ANSWERS) and the count of right ones by
+    group, recorded in milestone.json
     and logged as milestone/<group>/right and milestone/<group>/of. earlier: the milestone records of a start_from
     state, listed before this training's."""
 
@@ -296,9 +297,10 @@ class ChoiceMilestones(_milestones.Milestones):
             if not first:
                 return
             with (partial / _choice.ANSWERS).open("w") as f:
-                for row, (best, probability) in zip(self.found, found):
+                for row, (best, probability, every) in zip(self.found, found):
                     f.write(json.dumps({"group": row.get("group") or _choice.GROUP, "chosen": best,
-                                        "probability": round(probability, 6), "right": bool(row["right"][best])})
+                                        "probability": round(probability, 6), "right": bool(row["right"][best]),
+                                        "probabilities": [round(x, 6) for x in every]})
                             + "\n")
             record["scores"] = _choice.score(self.found, found)
             record["rows"] = len(self.found)
