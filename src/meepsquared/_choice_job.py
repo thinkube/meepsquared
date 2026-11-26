@@ -31,8 +31,9 @@ A milestone's rows are shared out the same way and its answers gathered.
 
 A checkpoint holds the adapter, the head, the optimizer, the scheduler and the
 trainer's state; a resumed training goes on at its question and step.
-start_from starts a new training from a state made outside meepsquared (see
-meepsquared._choice.read_start) at question N and optimizer step N /
+start_from starts a new training from a checkpoint folder of another choice
+training on the same data, or from a state made outside meepsquared (see
+meepsquared._choice.read_start), at question N and optimizer step N /
 effective_batch: the trainer is resumed from a checkpoint folder made for it,
 whose trainer state says that step, and the tensors and AdamW's state are
 copied in by name.
@@ -707,11 +708,14 @@ def prepare(job, reusing: dict = None, reused_from: str = ""):
     total = math.ceil(questions / effective)
     start, start_step = None, 0
     if job.start_from is not None:
-        start = _choice.read_start(job.start_from)
+        start = _choice.read_start(job.start_from, effective)
         # Without the model the state's tensors are not checked against it here; the training checks them
         if chooser is not None:
             _choice.check_start(chooser, start)
         examples = start["examples"]
+        if start.get("planned_steps") is not None and start["planned_steps"] != total:
+            raise ValueError(f"start_from: the training that saved {job.start_from} has {start['planned_steps']} "
+                             f"steps, and this one {total}: not the same data, length or effective_batch")
         if examples % effective:
             raise ValueError(f"start_from: {examples} questions are not whole optimizer steps of {effective}")
         if examples >= questions:

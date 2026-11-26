@@ -99,9 +99,13 @@ The trainer logs `milestone/<group>/right` and `milestone/<group>/of`. No `miles
 
 A checkpoint holds the same adapter, head and `choice.json` files, plus Transformers' `optimizer.pt`, `scheduler.pt`, `rng_state.pth` and `trainer_state.json`. `train(resume=True)` (or `meepsquared train --resume`) goes on at the next question and step.
 
-== Starting from a state made elsewhere
+== Going on in a new training
 
-`start_from` is a .pt file that `torch.load` reads as:
+`start_from` names a state that a new training goes on from: a checkpoint folder of another choice training, or a file of a state made elsewhere.
+
+A checkpoint folder (`<output>/checkpoint-<N>` of the other training) moves a training to another output folder, node or number of GPUs. The new training takes the checkpoint's adapter, head and AdamW state, and starts at the checkpoint's step: the questions before it are not read, and the learning rates are those of that step. Its data, length and `effective_batch` must be the other training's, since the step counts questions of that data: a checkpoint of a training with another number of steps is refused. The method and the candidates per pass may differ. The milestone records of the other training, up to the checkpoint's step, are listed first in the new one's.
+
+A file is a .pt that `torch.load` reads as:
 
 [source,python]
 ----

@@ -781,8 +781,10 @@ class TrainingJob:
         after the check that it was made from this job's inputs. Without it,
         the plan preprocesses the data first, into <output>/preprocessed; a
         launch of several processes (torchrun) needs it.
-    start_from: choice only, a .pt file of a training's state made outside
-        meepsquared, to go on from (see meepsquared._choice.read_start); a
+    start_from: choice only, a state to go on from in a new training: a
+        checkpoint folder of another choice training on the same data
+        (<its output>/checkpoint-<N>), or a .pt file of a training's state
+        made outside meepsquared (see meepsquared._choice.read_start); a
         resumed session goes on from its checkpoint, and start_from only says
         where the training began.
     milestone_weights: choice only, the method whose weights answer the
@@ -968,7 +970,8 @@ class TrainingJob:
         if self.gpus is not None and (isinstance(self.gpus, bool) or not isinstance(self.gpus, int) or self.gpus < 1):
             raise ValueError(f"gpus is a whole number of GPUs, 1 or more, not {self.gpus!r}")
         if self.start_from is not None and not isinstance(self.start_from, (str, os.PathLike)):
-            raise ValueError(f"start_from must be the path of a .pt file, not {type(self.start_from).__name__}")
+            raise ValueError("start_from must be the path of a checkpoint folder or of a .pt file, not "
+                             f"{type(self.start_from).__name__}")
         if self.milestone_weights is not None:
             if self.milestone_weights not in CHOICE_METHODS:
                 raise ValueError(f"milestone_weights is one of {list(CHOICE_METHODS)}, not {self.milestone_weights!r}")

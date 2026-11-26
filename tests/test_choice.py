@@ -292,6 +292,37 @@ def test_a_resumed_session_of_a_started_training_goes_on_from_its_checkpoint(tok
     assert resumed_rates[5] == pytest.approx(1e-2 * _choice_job.ramp(4, 1, 6))
 
 
+def test_start_from_a_checkpoint_folder_of_another_training_goes_on_at_its_step(tokenizer, tmp_path):
+    data = write(tmp_path / "train.jsonl", rows())
+    whole = make_job(tokenizer, tmp_path, "whole", data=data, steps=6)
+    reference = whole.trainer()
+    whole.train()
+
+    stop = tmp_path / "STOP"
+    first = make_job(tokenizer, tmp_path, "first", data=data, steps=6)
+    first.trainer().add_callback(StopAt(2, stop))
+    paused = first.train(stop_file=stop)
+    assert paused.paused and paused.steps == 2
+    stop.unlink()
+    checkpoint = tmp_path / "first" / "checkpoint-2"
+
+    job = make_job(tokenizer, tmp_path, "moved", data=data, steps=6, start_from=str(checkpoint))
+    assert job.plan()["start_from"].value == {"file": str(checkpoint), "examples": 4, "step": 2}
+    moved = job.trainer()
+    assert job.train().steps == 6
+    losses, rates = logged(reference, "loss"), logged(reference, "learning_rate")
+    moved_losses, moved_rates = logged(moved, "loss"), logged(moved, "learning_rate")
+    assert sorted(moved_losses) == [3, 4, 5, 6]
+    for step in range(3, 7):
+        assert moved_losses[step] == pytest.approx(losses[step], rel=1e-5, abs=1e-6)
+        assert moved_rates[step] == pytest.approx(rates[step], rel=1e-6)
+
+    with pytest.raises(ValueError, match="not the same data, length or effective_batch"):
+        make_job(tokenizer, tmp_path, "longer", data=data, steps=8, start_from=str(checkpoint)).plan()
+    with pytest.raises(FileNotFoundError, match="is not a checkpoint of a choice training"):
+        make_job(tokenizer, tmp_path, "none", data=data, steps=6, start_from=str(tmp_path)).plan()
+
+
 def test_a_start_from_state_of_other_parameters_is_refused(tokenizer, tmp_path):
     start = tmp_path / "start.pt"
     chooser = chooser_of(tokenizer)

@@ -528,12 +528,105 @@ def load(chooser: Chooser, folder) -> None:
             own[name].copy_(value.to(own[name].device, own[name].dtype))
 
 
-def read_start(path) -> dict:
-    """A start_from file: {"examples": N, "trainable": {name: tensor}, "optimizer": {name: {"step", "exp_avg",
-    "exp_avg_sq"}}, "milestones": [...] optional}, checked for its form."""
+CHECKPOINT_FILES = ("adapter_model.safetensors", HEAD_FILE, "optimizer.pt", "trainer_state.json")
+
+
+def _read_checkpoint(folder: Path, effective_batch) -> dict:
+    """A checkpoint folder of a choice training as a start_from state. Its step (trainer_state.json) times
+    `effective_batch` is the questions done; "planned_steps" is the length of the training that saved it. The
+    adapter and the head are under the names of their files, and AdamW's state by number, as Transformers saves
+    it (optimizer.pt): "checkpoint" holds them until name_checkpoint gives each its parameter's name, which needs
+    the model. The milestone records of the training that saved it, up to its step, are listed first."""
+    from safetensors.torch import load_file
+
+    missing = [name for name in CHECKPOINT_FILES if not (folder / name).is_file()]
+    if missing:
+        raise FileNotFoundError(f"start_from: {folder} is not a checkpoint of a choice training: it has no "
+                                f"{', '.join(missing)}")
+    if effective_batch is None:
+        raise ValueError(f"start_from: {folder} is a checkpoint, whose questions done are its steps times the "
+                         "training's effective_batch, which was not given")
+    state = json.loads((folder / "trainer_state.json").read_text())
+    step, planned = state.get("global_step"), state.get("max_steps")
+    for name, value in (("global_step", step), ("max_steps", planned)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"start_from: {folder / 'trainer_state.json'} has no whole {name}: {value!r}")
+    saved = torch.load(str(folder / "optimizer.pt"), map_location="cpu", weights_only=True)
+    if not isinstance(saved, dict) or not isinstance(saved.get("state"), dict) or not isinstance(
+            saved.get("param_groups"), list):
+        raise ValueError(f"start_from: {folder / 'optimizer.pt'} is not an optimizer's state")
+    groups = [list(group["params"]) for group in saved["param_groups"]]
+    numbers = [n for group in groups for n in group]
+    if numbers != list(range(len(numbers))) or len(groups) != 2:
+        raise ValueError(f"start_from: {folder / 'optimizer.pt'} does not number the adapter's parameters, then the "
+                         "head's, from 0")
+    by_number = []
+    for n in numbers:
+        entry = saved["state"].get(n)
+        if entry is not None and (sorted(entry) != sorted(ADAM_KEYS) or not all(isinstance(v, torch.Tensor)
+                                                                               for v in entry.values())):
+            raise ValueError(f"start_from: the optimizer state of parameter {n} of {folder / 'optimizer.pt'} must "
+                             f"be the tensors {', '.join(ADAM_KEYS)}")
+        by_number.append(entry)
+    milestones = []
+    for record in sorted((folder.parent / "milestones").glob("step-*/milestone.json")):
+        found = json.loads(record.read_text())
+        if isinstance(found, dict) and isinstance(found.get("step"), int) and found["step"] <= step:
+            milestones.append(found)
+    milestones.sort(key=lambda m: m["step"])
+    return {"examples": step * effective_batch, "planned_steps": planned, "trainable": None, "optimizer": None,
+            "checkpoint": {"folder": str(folder), "adapter": load_file(str(folder / CHECKPOINT_FILES[0])),
+                           "head": load_file(str(folder / HEAD_FILE)), "optimizer": by_number,
+                           "adapter_parameters": len(groups[0])},
+            "milestones": milestones}
+
+
+def name_checkpoint(chooser: Chooser, start: dict) -> None:
+    """A checkpoint's start state (_read_checkpoint) by the names of the chooser's parameters, in place: each
+    adapter tensor by the parameter PEFT saves under its file name, the head's as head.<path>, and AdamW's state
+    of parameter number n as the n-th trainable parameter's, the adapter's in named_parameters() order, then the
+    head's, which is the order the training's optimizer takes them in. A state already by name is left as it is."""
+    held = start.get("checkpoint")
+    if held is None:
+        return
+    from peft.utils import get_peft_model_state_dict
+
+    folder = held["folder"]
+    parameters = dict(chooser.peft.named_parameters())
+    # PEFT's file names of the adapter's parameters, in their order: a name without its adapter's
+    keys = list(get_peft_model_state_dict(chooser.peft, state_dict={n: parameters[n] for n in chooser.adapter_names}))
+    adapters = list(chooser.peft.peft_config)
+    if len(keys) != len(chooser.adapter_names) or not all(
+            any(name.replace(f".{a}", "") == key for a in adapters) for name, key in zip(chooser.adapter_names, keys)):
+        raise ValueError(f"start_from: PEFT does not save this model's {len(chooser.adapter_names)} adapter "
+                         f"parameters each under its name without the adapter's ({len(keys)} file names)")
+    missing, unknown = set(keys) - set(held["adapter"]), set(held["adapter"]) - set(keys)
+    if missing or unknown:
+        raise ValueError(f"start_from: the adapter of {folder} is not this model's: "
+                         + "; ".join(part for part in (f"not in the folder: {_names(missing)}" if missing else "",
+                                                       f"not trained here: {_names(unknown)}" if unknown else "")
+                                     if part))
+    trainable = {name: held["adapter"][key] for name, key in zip(chooser.adapter_names, keys)}
+    trainable.update({HEAD_PREFIX + n: value for n, value in held["head"].items()})
+    names = list(chooser.trainable())
+    if held["adapter_parameters"] != len(chooser.adapter_names) or len(held["optimizer"]) != len(names):
+        raise ValueError(f"start_from: the optimizer of {folder} holds {held['adapter_parameters']} adapter "
+                         f"parameters of {len(held['optimizer'])} in all, and this model trains "
+                         f"{len(chooser.adapter_names)} of {len(names)}")
+    start["trainable"] = trainable
+    start["optimizer"] = {name: entry for name, entry in zip(names, held["optimizer"]) if entry is not None}
+    del start["checkpoint"]
+
+
+def read_start(path, effective_batch=None) -> dict:
+    """A start_from state, checked for its form. A file: {"examples": N, "trainable": {name: tensor}, "optimizer":
+    {name: {"step", "exp_avg", "exp_avg_sq"}}, "milestones": [...] optional}. A folder: a checkpoint of a choice
+    training (_read_checkpoint), whose questions done are its steps times `effective_batch`."""
     path = Path(path)
+    if path.is_dir():
+        return _read_checkpoint(path, effective_batch)
     if not path.is_file():
-        raise FileNotFoundError(f"start_from: no file {path}")
+        raise FileNotFoundError(f"start_from: no file or checkpoint folder {path}")
     state = torch.load(str(path), map_location="cpu", weights_only=True)
     if not isinstance(state, dict):
         raise ValueError(f"start_from: {path} holds {type(state).__name__}, not a mapping")
@@ -571,7 +664,9 @@ def _names(names) -> str:
 
 
 def check_start(chooser: Chooser, start: dict) -> None:
-    """Refuse a start_from state that does not name exactly the chooser's trainable parameters, in their shapes."""
+    """Refuse a start_from state that does not name exactly the chooser's trainable parameters, in their shapes.
+    A checkpoint's state gets its names here first (name_checkpoint)."""
+    name_checkpoint(chooser, start)
     trainable = chooser.trainable()
     missing, unknown = set(trainable) - set(start["trainable"]), set(start["trainable"]) - set(trainable)
     if missing or unknown:
@@ -596,6 +691,7 @@ def check_start(chooser: Chooser, start: dict) -> None:
 def apply_start(chooser: Chooser, start: dict, optimizer=None) -> None:
     """The start_from tensors copied into the chooser's parameters; with `optimizer` (AdamW over them), its state
     set by name."""
+    name_checkpoint(chooser, start)
     trainable = chooser.trainable()
     with torch.no_grad():
         for name, value in start["trainable"].items():
