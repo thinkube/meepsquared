@@ -158,7 +158,7 @@ def test_the_status_file_follows_the_training(tokenizer, tmp_path, monkeypatch):
 
     assert set(writes[0]) == {"state", "step", "total_steps", "loss", "seconds_per_step", "eta_seconds",
                               "checkpoint", "plan", "error", "eval_loss", "eval_step", "milestones",
-                              "milestone_seconds", "next_milestone", "updated"}
+                              "milestone_seconds", "next_milestone", "milestone_running", "updated"}
     assert writes[0]["state"] == "planning" and writes[0]["plan"] is None
     training = [w for w in writes if w["state"] == "training"]
     assert training[0]["step"] == 0 and training[0]["total_steps"] == STEPS
