@@ -11,7 +11,7 @@ import torch
 from transformers import LlamaConfig, LlamaForCausalLM, TrainerCallback
 
 import meepsquared as m2
-from meepsquared import _choice, _choice_job, cli
+from meepsquared import _choice, _choice_job, _sessions, cli
 from meepsquared.job import TrainingJob
 from meepsquared.models import MeepLanguageModel
 
@@ -598,3 +598,62 @@ def test_every_candidates_probability_is_the_softmax_and_the_chosen_one_is_its_t
     best, probability = _choice.choose(head, z, states, None)
     assert len(every) == 5 and sum(every) == pytest.approx(1.0)
     assert max(range(5), key=every.__getitem__) == best and every[best] == pytest.approx(probability)
+
+
+class Recorded:
+    """A status file as ChoiceMilestones writes it: the fields of each update."""
+
+    def __init__(self):
+        self.updates = []
+
+    def update(self, **fields):
+        self.updates.append(fields)
+
+
+def test_a_milestones_progress_is_written_as_it_answers_and_at_most_every_progress_seconds(tmp_path):
+    now = [0.0]
+    status = Recorded()
+    progress = _choice_job.MilestoneProgress(tmp_path, 40, 9, 0, 1, status, "2026-11-26T12:00:00+00:00",
+                                             clock=lambda: now[0])
+    assert status.updates == [{"milestone_running": {"step": 40, "answered": 0, "rows": 9,
+                                                     "started_at": "2026-11-26T12:00:00+00:00"}}]
+    progress(1)
+    now[0] = _choice_job.PROGRESS_SECONDS
+    progress(2)
+    assert [u["milestone_running"]["answered"] for u in status.updates] == [0, 2]
+
+
+def test_with_several_processes_the_progress_is_the_sum_of_their_counts(tmp_path):
+    now = [0.0]
+    status = Recorded()
+    first = _choice_job.MilestoneProgress(tmp_path, 7, 10, 0, 2, status, "t", clock=lambda: now[0])
+    second = _choice_job.MilestoneProgress(tmp_path, 7, 10, 1, 2, None, "t", clock=lambda: now[0])
+    now[0] = _choice_job.PROGRESS_SECONDS
+    second(4)
+    first(3)
+    assert status.updates[-1]["milestone_running"]["answered"] == 7 and len(status.updates) == 2
+    counts = tmp_path / "milestones" / "step-7.answered"
+    second.close()
+    assert counts.is_dir()
+    first.close()
+    assert not counts.exists()
+
+
+def test_a_choice_milestone_writes_its_progress_in_the_status_file(tokenizer, tmp_path, monkeypatch):
+    monkeypatch.setattr(_choice_job, "PROGRESS_SECONDS", 0.0)
+    seen = []
+    update = _sessions.Status.update
+
+    def watch(self, **fields):
+        if fields.get("milestone_running") is not None:
+            seen.append(fields["milestone_running"])
+        update(self, **fields)
+
+    monkeypatch.setattr(_sessions.Status, "update", watch)
+    milestone_eval = write(tmp_path / "milestones.jsonl", rows(4))
+    job = make_job(tokenizer, tmp_path, milestones=0.5, milestone_eval=milestone_eval)
+    job.train(status_file=tmp_path / "status.json")
+    assert [(r["step"], r["answered"], r["rows"]) for r in seen] == [
+        (2, 0, 4), (2, 1, 4), (2, 2, 4), (2, 3, 4), (2, 4, 4), (4, 0, 4), (4, 1, 4), (4, 2, 4), (4, 3, 4), (4, 4, 4)]
+    # Written whole, the milestone's progress is gone
+    assert json.loads((tmp_path / "status.json").read_text())["milestone_running"] is None

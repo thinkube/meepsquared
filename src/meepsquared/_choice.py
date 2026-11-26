@@ -43,7 +43,7 @@ import math
 import os
 import statistics
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 from torch import nn
@@ -441,9 +441,10 @@ class Chooser(nn.Module):
         return choice_loss(self.head, z, states, target, none)
 
 
-def answer(chooser: Chooser, rows: list) -> list:
+def answer(chooser: Chooser, rows: list, progress: Optional[Callable[[int], None]] = None) -> list:
     """(the top candidate, its probability, every candidate's probability) of each encoded row, the model in
-    evaluation mode and without gradients; its mode is put back after."""
+    evaluation mode and without gradients; its mode is put back after. progress is called with the number of rows
+    answered after each one."""
     training = chooser.training
     chooser.eval()
     found = []
@@ -453,6 +454,8 @@ def answer(chooser: Chooser, rows: list) -> list:
                 z, states = chooser.outputs(row["shared"], row["own"], grad=False)
                 best, probability = choose(chooser.head, z, states, row.get("none"))
                 found.append((best, probability, probabilities(chooser.head, z, states, row.get("none"))))
+                if progress is not None:
+                    progress(len(found))
     finally:
         chooser.train(training)
     return found

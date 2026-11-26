@@ -67,13 +67,15 @@ def write_json(path: Path, data: dict) -> None:
 
 
 class Status:
-    """The status file of a training: its state, its step, its last loss, its speed and its last checkpoint."""
+    """The status file of a training: its state, its step, its last loss, its speed and its last checkpoint.
+    milestone_running, while a milestone answers its rows: {"step", "answered", "rows", "started_at"}; null else."""
 
     def __init__(self, path):
         self.path = Path(path)
         self.fields = {"state": "planning", "step": 0, "total_steps": 0, "loss": None, "seconds_per_step": None,
                        "eta_seconds": None, "checkpoint": None, "plan": None, "error": None, "eval_loss": None,
-                       "eval_step": None, "milestones": None, "milestone_seconds": None, "next_milestone": None}
+                       "eval_step": None, "milestones": None, "milestone_seconds": None, "next_milestone": None,
+                       "milestone_running": None}
 
     def update(self, **fields) -> None:
         unknown = set(fields) - set(self.fields)

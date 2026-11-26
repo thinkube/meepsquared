@@ -359,7 +359,7 @@ class Milestones(TrainerCallback):
             return
         upcoming = [s for s in sorted(self.at) if s > state.global_step]
         self.status.update(milestones=self.records(), milestone_seconds=self.seconds,
-                           next_milestone=upcoming[0] if upcoming else None)
+                           next_milestone=upcoming[0] if upcoming else None, milestone_running=None)
 
     def on_train_begin(self, args, state, control, **kwargs):
         if state.is_world_process_zero:

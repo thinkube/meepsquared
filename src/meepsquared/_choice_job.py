@@ -43,6 +43,7 @@ answer its rows: each row's top candidate, and the count of right ones.
 """
 
 import dataclasses
+import datetime
 import functools
 import json
 import math
@@ -56,7 +57,7 @@ from pathlib import Path
 import torch
 from transformers import Trainer, TrainingArguments
 
-from meepsquared import _choice, _milestones
+from meepsquared import _choice, _milestones, _sessions
 
 # The defaults of a choice job, each stated in the plan with its source
 RANK = 16
@@ -252,6 +253,52 @@ class ChoiceTrainer(Trainer):
                 self._start_folder = None
 
 
+# How often, in seconds, a milestone's count of answered rows is written while it answers them
+PROGRESS_SECONDS = 10.0
+
+
+class MilestoneProgress:
+    """How many rows of a milestone the processes have answered, written in the status file while they answer them
+    (milestone_running), at most every PROGRESS_SECONDS. With several GPUs each process answers a share of the rows
+    and writes its own count into <output>/milestones/step-<N>.answered/<rank>; the first process, the one with the
+    status file, writes their sum."""
+
+    def __init__(self, output, step: int, rows: int, rank: int, gpus: int, status, started_at: str,
+                 clock=time.monotonic):
+        self.step, self.rows, self.rank, self.gpus, self.status = step, rows, rank, gpus, status
+        self.started_at, self.every, self.clock = started_at, PROGRESS_SECONDS, clock
+        self.counts = _milestones.folder(output, step).with_name(f"step-{step}.answered")
+        self.answered, self.written = 0, None
+        if gpus > 1:
+            self.counts.mkdir(parents=True, exist_ok=True)
+        self._write()
+
+    def __call__(self, answered: int) -> None:
+        self.answered = answered
+        if self.clock() - self.written >= self.every:
+            self._write()
+
+    def _count(self, rank: int) -> int:
+        path = self.counts / str(rank)
+        # A process that has not written its count yet has answered no row
+        return json.loads(path.read_text())["answered"] if path.exists() else 0
+
+    def _write(self) -> None:
+        self.written = self.clock()
+        if self.gpus > 1:
+            _sessions.write_json(self.counts / str(self.rank), {"answered": self.answered})
+        if self.status is None:
+            return
+        answered = self.answered if self.gpus == 1 else sum(self._count(r) for r in range(self.gpus))
+        self.status.update(milestone_running={"step": self.step, "answered": answered, "rows": self.rows,
+                                              "started_at": self.started_at})
+
+    def close(self) -> None:
+        """Called by every process once all have answered: the first one removes the counts."""
+        if self.status is not None:
+            shutil.rmtree(self.counts, ignore_errors=True)
+
+
 class ChoiceMilestones(_milestones.Milestones):
     """At the end of each milestone's step: the adapter and the head saved apart in <output>/milestones/step-<N> and,
     with rows, each row's top candidate and every candidate's probability (ANSWERS) and the count of right ones by
@@ -280,6 +327,7 @@ class ChoiceMilestones(_milestones.Milestones):
         if self.found is None and not first:
             return
         began = time.perf_counter()
+        started_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
         chooser = self.trainer.model
         final = _milestones.folder(self.output, step)
         partial = final.with_name(final.name + ".partial")
@@ -294,7 +342,14 @@ class ChoiceMilestones(_milestones.Milestones):
                 method, answerer = self.answering
                 _choice.copy_trainable(chooser, answerer)
                 record["weights"] = method
-            found = share_answers(answerer, self.found, self.trainer.settings["gpus"])
+            gpus = self.trainer.settings["gpus"]
+            rank = torch.distributed.get_rank() if gpus > 1 else 0
+            progress = MilestoneProgress(self.output, step, len(self.found), rank, gpus,
+                                         self.status if first else None, started_at)
+            try:
+                found = share_answers(answerer, self.found, gpus, progress)
+            finally:
+                progress.close()
             if not first:
                 return
             with (partial / _choice.ANSWERS).open("w") as f:
@@ -503,16 +558,17 @@ def _most(values: list) -> list:
     return [None if v is None else type(v)(f) for v, f in zip(values, found.tolist())]
 
 
-def share_answers(chooser, rows: list, gpus: int) -> list:
+def share_answers(chooser, rows: list, gpus: int, progress=None) -> list:
     """_choice.answer of the rows, each process of the launch answering every gpus-th row from its rank, and every
-    process given all the answers in the rows' order."""
+    process given all the answers in the rows' order. progress is called with the count of this process's rows
+    answered."""
     if gpus == 1:
-        return _choice.answer(chooser, rows)
+        return _choice.answer(chooser, rows, progress)
     import torch.distributed as dist
 
     rank = dist.get_rank()
     parts = [None] * gpus
-    dist.all_gather_object(parts, _choice.answer(chooser, rows[rank::gpus]))
+    dist.all_gather_object(parts, _choice.answer(chooser, rows[rank::gpus], progress))
     found = [None] * len(rows)
     for r, part in enumerate(parts):
         found[r::gpus] = part
