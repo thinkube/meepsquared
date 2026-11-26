@@ -307,8 +307,8 @@ class MeepLanguageModel:
             on a GPU of compute capability 8.9 or later. Not with load_in_4bit.
         load_in_nvfp4: the frozen linear layers of the decoder held as NVFP4
             by Transformer Engine once the adapters are added, their inputs
-            quantized to NVFP4 too, their products on the FP4 tensor cores (see
-            meepsquared._nvfp4); about twice BF16's speed on a GB10. Needs
+            quantized to NVFP4 too, their forward products on the FP4 tensor
+            cores, their inputs' gradients in 16 bits (see meepsquared._nvfp4). Needs
             compute capability 10.0 or later and Transformer Engine. Not with
             load_in_4bit or load_in_fp8.
         shared_vllm: vLLM in this process, holding the model's routed expert

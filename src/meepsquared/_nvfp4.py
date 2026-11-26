@@ -7,25 +7,29 @@ A LoRA training reads the base model's linear layers and never updates them.
 Each one is replaced, once the adapters are added, by a Transformer Engine
 layer whose weight is held as NVFP4 (FP4 e2m1 values, one FP8 scale per block
 of 16 and one float32 scale per tensor) and whose input is quantized to NVFP4
-as it comes, both under Transformer Engine's NVFP4 recipe: the products run
-on the FP4 tensor cores, forward and, for the input's gradient, backward. The
-weight gets no gradient. The adapters stay in BF16, as does everything that
-is not a frozen linear layer of the decoder: embeddings, norms, routers, the
-output layer and a mixture of experts' expert stacks.
+as it comes, both under Transformer Engine's NVFP4 recipe: the forward
+product runs on the FP4 tensor cores. The weight gets no gradient. The
+adapters stay in BF16, as does everything that is not a frozen linear layer
+of the decoder: embeddings, norms, routers, the output layer and a mixture of
+experts' expert stacks.
 
-Measured on an NVIDIA GB10 (compute capability 12.1), a frozen layer's
-forward and input gradient over 4,096 tokens: 2.0 times BF16's speed at
-2560 x 10240 and 2.2 times at 5376 x 21504; Meep²'s FP8 layer gives 1.33 and
-1.65 times. Transformer Engine holds the weight twice, as it is and
-transposed for the backward product: 1.125 bytes a weight, 56% of BF16's
-memory, where FP8 holds one byte.
+The input's gradient is computed in the layer's dtype (BF16), as the
+output's gradient times the weight dequantized for that product: the
+gradient of the product the forward computed, its input's quantization read
+as the identity. Transformer Engine's own backward quantizes the output's
+gradient to NVFP4 first, and its recipe rounds that gradient stochastically
+so that the rounding has no bias. The Transformer Engine of NVIDIA's PyTorch
+26.03 container has no stochastic-rounding FP4 kernel for compute capability
+12.1 (it faults with "FP4 cvt PTX instructions are architecture-specific"),
+and a gradient rounded to the nearest FP4 value in every frozen layer it
+crosses carries a bias that adds up over the layers: the adapters and the
+head then train on a wrong gradient.
 
-The recipe is Transformer Engine's NVFP4BlockScaling with stochastic
-rounding off: the Transformer Engine of NVIDIA's PyTorch 26.03 container has
-no stochastic-rounding FP4 kernel for compute capability 12.1 (it faults with
-"FP4 cvt PTX instructions are architecture-specific"), and the base weights
-receive no update for that rounding to keep unbiased; the random Hadamard
-transform and the weights' 2D blocks are the recipe's own.
+Transformer Engine holds the weight twice, as it is and transposed: 1.125
+bytes a weight, 56% of BF16's memory, where FP8 holds one byte. The recipe is
+Transformer Engine's NVFP4BlockScaling with stochastic rounding off, which
+concerns gradients only and no gradient is quantized here; the weights' 2D
+blocks are the recipe's own.
 
 Transformer Engine takes a product whose rows (every dimension of the input
 but the last) are a multiple of 8: the rows are padded with zeros to a
@@ -64,6 +68,24 @@ def recipe():
     return NVFP4BlockScaling(disable_stochastic_rounding=True)
 
 
+class _Nvfp4Product(torch.autograd.Function):
+    """y = rows @ W^T with W and the rows in NVFP4, by the Transformer Engine layer; the backward gives the rows'
+    gradient only, W being frozen: the output's gradient times the dequantized W, in the gradient's dtype."""
+
+    @staticmethod
+    def forward(ctx, rows, layer):
+        import transformer_engine.pytorch as te
+
+        ctx.layer = layer
+        with te.autocast(enabled=True, recipe=layer.recipe):
+            return layer.inner(rows)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        weight = ctx.layer.inner.weight.dequantize().to(grad_out.dtype)
+        return grad_out @ weight, None
+
+
 class Nvfp4Linear(nn.Module):
     """A frozen linear layer held as NVFP4 by a Transformer Engine layer; its bias, if any, stays as it was."""
 
@@ -82,18 +104,15 @@ class Nvfp4Linear(nn.Module):
         self.inner.weight.requires_grad_(False)
         self.bias = linear.bias
 
-    @torch.compiler.disable  # Dynamo does not trace Transformer Engine's layers
+    @torch.compiler.disable  # Dynamo traces neither Transformer Engine's layers nor the product's autograd function
     def forward(self, x):
-        import transformer_engine.pytorch as te
-
         shape = x.shape
         rows = x.reshape(-1, shape[-1]).to(self.dtype)
         count = rows.shape[0]
         padding = -count % ROW_MULTIPLE
         if padding:
             rows = nn.functional.pad(rows, (0, 0, 0, padding))
-        with te.autocast(enabled=True, recipe=self.recipe):
-            out = self.inner(rows)
+        out = _Nvfp4Product.apply(rows, self)
         out = out[:count].reshape(*shape[:-1], self.out_features)
         if self.bias is not None:
             out = out + self.bias

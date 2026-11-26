@@ -67,6 +67,21 @@ def test_an_nvfp4_layer_computes_as_its_16_bit_layer_for_any_rows(shape):
 
 
 @blackwell
+@pytest.mark.parametrize("shape", [(1, 1357, 256), (7, 256)])
+def test_the_input_gradient_is_the_16_bit_product_with_the_dequantized_weight(shape):
+    torch.manual_seed(0)
+    dense = torch.nn.Linear(256, 512, bias=False, device="cuda", dtype=torch.bfloat16).requires_grad_(False)
+    layer = _nvfp4.Nvfp4Linear(dense)
+    x = torch.randn(*shape, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    out = layer(x)
+    grad_out = torch.randn_like(out)
+    out.backward(grad_out)
+    expected = grad_out.reshape(-1, 512) @ layer.dequantized()
+    # no quantization of the gradient: only bfloat16's rounding of the product stands between the two
+    assert relative(x.grad.reshape(-1, 256), expected) < 1e-2
+
+
+@blackwell
 def test_the_adapters_train_on_nvfp4_layers(tiny_model):
     from peft import LoraConfig, get_peft_model
 

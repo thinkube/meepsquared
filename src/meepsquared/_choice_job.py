@@ -575,7 +575,8 @@ def _weights_decision(job, model):
     if job.method == "nvfp4":
         return Decision("weights", "weights", job.method,
                         f"the frozen linear layers of the decoder and their inputs in NVFP4 (Transformer Engine), "
-                        f"their products on the FP4 tensor cores, computing in {dtype_name}; the head in float32",
+                        f"their forward products on the FP4 tensor cores, the gradients in {dtype_name}; the head in "
+                        "float32",
                         "method nvfp4 (see meepsquared._nvfp4); the adapters, embeddings, norms and routers stay in "
                         f"{dtype_name}")
     return Decision("weights", "weights", job.method, dtype_name, f"method {job.method}; the head in float32")
