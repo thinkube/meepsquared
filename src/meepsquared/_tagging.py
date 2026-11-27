@@ -335,7 +335,10 @@ class Bottleneck(nn.Module):
 
 
 class _Adapted(nn.Module):
-    """A layer's feed-forward output projection, then its bottleneck adapter."""
+    """A layer's feed-forward output projection, then its bottleneck adapter. The adapter keeps its own dtype (float32)
+    while the frozen encoder may be in 16 bits: the projection's output goes into the adapter in the adapter's dtype
+    and comes back in its own, so the layer computes with or without autocast (the plan's timed steps run without
+    it; under autocast the adapter's products run in 16 bits as the encoder's do)."""
 
     def __init__(self, dense: nn.Linear, adapter: Bottleneck):
         super().__init__()
@@ -343,7 +346,8 @@ class _Adapted(nn.Module):
         self.adapter = adapter
 
     def forward(self, x):
-        return self.adapter(self.dense(x))
+        y = self.dense(x)
+        return self.adapter(y.to(self.adapter.down.weight.dtype)).to(y.dtype)
 
 
 def add_bottlenecks(encoder, size: int) -> int:

@@ -167,6 +167,19 @@ def test_a_tagger_learns(encoder_path, treebank, method):
     assert losses[-1] < losses[0] / 2
 
 
+def test_a_16_bit_encoder_runs_its_float32_adapters_without_autocast(encoder_path, treebank):
+    from transformers import AutoModel
+
+    rows = [json.loads(line) for line in open(treebank[0])]
+    tasks = _tagging.build_tasks(rows, ["upos"])
+    encoder = AutoModel.from_pretrained(encoder_path, add_pooling_layer=False, dtype=torch.bfloat16)
+    tagger = _tagging.build(encoder, {"method": "bottleneck", "dropout": 0.0, "bottleneck": 8}, tasks)
+    adapter = next(m for m in tagger.modules() if isinstance(m, _tagging.Bottleneck))
+    assert adapter.down.weight.dtype == torch.float32
+    states = encoder(input_ids=torch.tensor([[0, 4, 5, 2]])).last_hidden_state
+    assert states.dtype == torch.bfloat16
+
+
 def test_checkpointing_reaches_the_encoder_layers(encoder_path, treebank):
     from transformers import AutoModel
 
