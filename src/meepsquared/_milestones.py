@@ -56,10 +56,33 @@ FOLDER = "milestones"
 GROUP = "all"
 
 
-def steps(planned: int, share: float) -> list:
-    """The steps of the milestones: every `share` of the planned steps, rounded up, and the last step."""
-    count = max(1, round(1 / share))
-    return sorted({min(planned, math.ceil(planned * k / count)) for k in range(1, count + 1)})
+def steps(planned: int, share: float, growth: Optional[float] = None) -> list:
+    """The steps of the milestones, and the last step. Without growth: every `share` of the planned steps, rounded
+    up. With it: the distances between milestones grow, the first `share` of the planned steps and each next one
+    `growth` times the one before; each milestone is the sum of the distances before it, rounded up (at least one
+    step after the one before). The milestones come often at the start, where the scores move fast, and seldom
+    later."""
+    if growth is None:
+        count = max(1, round(1 / share))
+        return sorted({min(planned, math.ceil(planned * k / count)) for k in range(1, count + 1)})
+    found, distance, at, last = set(), planned * share, 0.0, 0
+    while True:
+        at += distance
+        # Rounded to a millionth first: a share written as distance / planned gives back its distance exactly
+        step = max(last + 1, math.ceil(round(at, 6)))
+        if step >= planned:
+            break
+        found.add(step)
+        last, distance = step, distance * growth
+    return sorted(found | {planned})
+
+
+def spacing_text(planned: int, share: float, growth: Optional[float] = None) -> str:
+    """Why the milestones are where they are, for a plan."""
+    if growth is None:
+        return f"every {share:g} of the {planned} planned steps, and the last"
+    return (f"the first after {share:g} of the {planned} planned steps, each distance between two {growth:g} times "
+            "the one before, and the last: often at the start, seldom later")
 
 
 def folder(output, step: int) -> Path:
@@ -336,7 +359,7 @@ class Milestones(TrainerCallback):
             return
         upcoming = [s for s in sorted(self.at) if s > state.global_step]
         self.status.update(milestones=self.records(), milestone_seconds=self.seconds,
-                           next_milestone=upcoming[0] if upcoming else None)
+                           next_milestone=upcoming[0] if upcoming else None, milestone_running=None)
 
     def on_train_begin(self, args, state, control, **kwargs):
         if state.is_world_process_zero:

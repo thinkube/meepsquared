@@ -77,6 +77,16 @@ With these calls you choose the batch, the learning rate and the optimizer in `S
 
 With `from_pretrained(..., load_in_fp8=True)`, the expert stacks that carry adapters are held as FP8 (e4m3) with one scale per expert, as the frozen linear layers are (see xref:sft.adoc#_frozen_weights_in_fp8[Frozen weights in FP8]). The stacks are most of a mixture-of-experts model's weights, so its memory about halves: Qwen3.6-35B-A3B's 70 GB become about 37 GB. The kernel reads the FP8 stack as it is and converts each tile in registers; where the kernel does not run, a stack is dequantized to the compute dtype for each product and dropped again. The routers stay in BF16: their decisions should not move with the quantization. The xref:benchmarks.adoc#_mixture_of_experts_on_one_nvidia_gb10[benchmark] gives the numbers: on a GB10 the FP8 stacks are the fastest arm and the smallest.
 
+== Expert stacks in NF4
+
+With `from_pretrained(..., load_in_4bit=True)`, the expert stacks are held as NF4 too, unless `experts_4bit=False`. bitsandbytes quantizes only the linear layers, and Transformers stores the experts as one 3D tensor per projection, so without this they stay in 16 bits: on Gemma 4 26B-A4B the experts are 22.8 of its 26 billion parameters, 46 GB in BF16 and about 13 GB in NF4, which is what lets it train on one 24 GB GPU.
+
+When the checkpoint stores each stack as one tensor (Gemma 4, Qwen3.5 and Qwen3.6), the stacks are not read with the rest of the checkpoint: they are read after it, one at a time, to the GPU of their layer, and quantized there (NF4, blocks of 64, with the double quantization of the linear layers or without it), so the load needs the memory of one stack in 16 bits beside the model. A checkpoint of one tensor per expert is fused into stacks by Transformers as it loads, in 16 bits, and the stacks are quantized after: that load needs the memory of the 16-bit stacks, the training only that of NF4.
+
+The experts then run as Transformers' grouped forward, registered as its experts implementation `meepsquared_nf4`: each product dequantizes its stack, computes in BF16, and drops it; the backward pass, which needs only the input's gradient, dequantizes it again. The transient memory is one stack in BF16; the time is one dequantization of each stack per product.
+
+LoRA on the stacks needs them as parameters: `target_parameters` with NF4 stacks is refused, and a training job with `Recipe(experts=True)` loads them in 16 bits. A merged save writes the NF4 stacks dequantized.
+
 == The kernel
 
 PyTorch's grouped matrix product, which Transformers' experts use, has kernels of its own on compute capability 9.x and 10.x (Hopper, B200). On every other GPU, the GB10 and the RTX 30, 40 and 50 series among them, it runs as a loop of one product per expert: about 223,000 launches per step on Qwen3.6-35B-A3B, which bind the step to the CPU that launches them.

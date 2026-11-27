@@ -13,8 +13,8 @@ from typing import Any, Optional
 
 import torch
 
-from meepsquared import (_banner, _checkpointing, _compile, _fp8, _fused, _linear_attention, _liger, _moe, _save,
-                    _selective, _shared_vllm, _split, _unified_memory, _varlen)
+from meepsquared import (_banner, _checkpointing, _compile, _fp8, _fused, _linear_attention, _liger, _moe,
+                    _nf4_experts, _nvfp4, _save, _selective, _shared_vllm, _split, _unified_memory, _varlen)
 
 DEFAULT_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 ATTENTION_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj"]
@@ -253,6 +253,22 @@ def _adapters_off_fp8(peft_model) -> int:
     return len(fp8)
 
 
+@contextlib.contextmanager
+def _stacked(outer, inner):
+    """outer entered, then inner: inner wraps what outer set."""
+    with outer, inner:
+        yield
+
+
+def four_bit_config(dtype: torch.dtype, double_quant: bool = True, quant_storage: Optional[torch.dtype] = None):
+    """Transformers' BitsAndBytesConfig of NF4 weights computing in `dtype`, with or without double quantization."""
+    from transformers import BitsAndBytesConfig
+
+    return BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=dtype,
+                              bnb_4bit_use_double_quant=double_quant,
+                              **({"bnb_4bit_quant_storage": quant_storage} if quant_storage else {}))
+
+
 class MeepLanguageModel:
     @staticmethod
     def from_pretrained(
@@ -261,6 +277,7 @@ class MeepLanguageModel:
         dtype: Optional[torch.dtype] = None,
         load_in_4bit: bool = False,
         load_in_fp8: bool = False,
+        load_in_nvfp4: bool = False,
         attn_implementation: Optional[str] = None,
         liger: bool = True,
         loss_chunk_budget: int = 32,
@@ -269,7 +286,9 @@ class MeepLanguageModel:
         trust_remote_code: bool = False,
         fast_inference: bool = False,
         quant_storage: Optional[torch.dtype] = None,
+        double_quant: bool = True,
         shared_vllm: Optional[dict] = None,
+        experts_4bit: bool = True,
         **kwargs,
     ):
         """The model and its tokenizer, ready for get_peft_model.
@@ -286,11 +305,23 @@ class MeepLanguageModel:
             the FP8 tensor cores (see meepsquared._fp8), inside the fused LoRA
             kernels too; half their memory, and about 1.6 times faster products
             on a GPU of compute capability 8.9 or later. Not with load_in_4bit.
+        load_in_nvfp4: the frozen linear layers of the decoder held as NVFP4
+            by Transformer Engine once the adapters are added, their inputs
+            quantized to NVFP4 too, their forward products on the FP4 tensor
+            cores, their inputs' gradients in 16 bits (see meepsquared._nvfp4). Needs
+            compute capability 10.0 or later and Transformer Engine. Not with
+            load_in_4bit or load_in_fp8.
         shared_vllm: vLLM in this process, holding the model's routed expert
             stacks once for both (see meepsquared._shared_vllm): the settings of
             its engine, {"max_lora_rank", "kv_cache_bytes", "max_model_len"}.
             The model then has the engine in model._meepsquared["engine"].
             Not with load_in_4bit; on one GPU.
+        double_quant: with load_in_4bit, the quantization constants quantized
+            too (QLoRA's double quantization); False keeps them in 32 bits.
+        experts_4bit: with load_in_4bit, the expert stacks of a mixture of
+            experts held as NF4 too (see meepsquared._nf4_experts), which
+            bitsandbytes leaves in 16 bits; False keeps them in 16 bits, as
+            LoRA on the stacks (target_parameters) needs.
         quant_storage: the dtype bitsandbytes packs the 4-bit weights in; under
             FSDP2 the model's dtype (torch.bfloat16), so that a layer's weights
             share one dtype to be sharded.
@@ -317,8 +348,13 @@ class MeepLanguageModel:
             )
         for vllm_only in ("gpu_memory_utilization", "max_lora_rank"):
             kwargs.pop(vllm_only, None)
-        if load_in_4bit and load_in_fp8:
-            raise ValueError("load_in_4bit and load_in_fp8 are two ways to hold the frozen weights; choose one")
+        if sum((load_in_4bit, load_in_fp8, load_in_nvfp4)) > 1:
+            raise ValueError("load_in_4bit, load_in_fp8 and load_in_nvfp4 are ways to hold the frozen weights; "
+                             "choose one")
+        if load_in_nvfp4:
+            ok, why = _nvfp4.available()
+            if not ok:
+                raise RuntimeError(f"load_in_nvfp4=True: {why}")
         if load_in_fp8:
             ok, why = _fp8.available()
             if not ok:
@@ -329,11 +365,7 @@ class MeepLanguageModel:
         hub = {"token": token, "trust_remote_code": trust_remote_code}
         quantization = None
         if load_in_4bit:
-            from transformers import BitsAndBytesConfig
-
-            quantization = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
-                                              bnb_4bit_compute_dtype=dtype, bnb_4bit_use_double_quant=True,
-                                              **({"bnb_4bit_quant_storage": quant_storage} if quant_storage else {}))
+            quantization = four_bit_config(dtype, double_quant, quant_storage)
         # One process per GPU (torchrun, accelerate launch) puts the model on its own GPU
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         device_map = device_map if device_map is not None else {"": local_rank}
@@ -345,6 +377,8 @@ class MeepLanguageModel:
         allocator_cap = _unified_memory.cap_allocator(gpu_index) if shared else None
         loading = _unified_memory.shards_to_gpu(f"cuda:{gpu_index}") if shared else contextlib.nullcontext()
         if shared_vllm is not None:
+            if load_in_nvfp4:
+                raise ValueError("shared_vllm: vLLM shares 16-bit or FP8 expert stacks; NVFP4 is not shared")
             if load_in_4bit:
                 raise ValueError("shared_vllm: vLLM shares 16-bit or FP8 expert stacks, not 4-bit ones")
             if gpu_index is None:
@@ -352,6 +386,13 @@ class MeepLanguageModel:
             _shared_vllm.check_architecture(model_name)
             # The expert stacks are not read: vLLM's take their place once it has loaded
             loading = _shared_vllm.trainer_without_stacks(f"cuda:{gpu_index}")
+        nf4_stacks = None
+        if load_in_4bit and experts_4bit:
+            # The stacks the checkpoint stores as one tensor each are not read with the rest, and are read after
+            # one at a time into NF4; a checkpoint of one tensor per expert is quantized once loaded
+            nf4_stacks = _nf4_experts.checkpoint_stacks(model_name, token)
+            if nf4_stacks:
+                loading = _stacked(loading, _nf4_experts.without_stacks())
         model_config = AutoConfig.from_pretrained(model_name, **hub)
         attention_auto, attention_why = choose_attention(model_config)
         if attn_implementation is None:
@@ -363,6 +404,9 @@ class MeepLanguageModel:
                 model_name, dtype=dtype, attn_implementation=attention, quantization_config=quantization,
                 device_map=device_map, **hub, **kwargs,
             )
+        nf4_experts = None
+        if nf4_stacks is not None:
+            nf4_experts = _nf4_experts.load(model, model_name, nf4_stacks, dtype, double_quant)
         tokenizer = load_tokenizer(model_name, **hub)
         if liger:
             _liger.prepare(model, loss_chunk_budget)
@@ -372,7 +416,8 @@ class MeepLanguageModel:
         if padding_free and has_linear_attention(model.config):
             _linear_attention.patch(model)
         model._meepsquared = {"padding_free": padding_free, "padding_free_reason": refusal, "liger": liger,
-                         "split": _split.apply(model), "fp8": load_in_fp8,
+                         "split": _split.apply(model), "fp8": load_in_fp8, "nvfp4": load_in_nvfp4,
+                         "nf4_experts": nf4_experts,
                          "attention_auto": (attention_auto, attention_why)}
         model._meepsquared["allocator_cap"] = allocator_cap
         if shared_vllm is not None:
@@ -396,8 +441,12 @@ class MeepLanguageModel:
         dtype_name = str(dtype).removeprefix("torch.")
         _banner.show(model_type=model.config.model_type, liger=liger, padding_free=padding_free,
                      padding_free_reason=refusal,
-                     weights=(f"4-bit NF4 computing in {dtype_name}" if load_in_4bit
-                              else f"FP8 e4m3 frozen weights computing in {dtype_name}" if load_in_fp8 else dtype_name))
+                     weights=(f"4-bit NF4 computing in {dtype_name}"
+                              + (f", {nf4_experts['stacks']} expert stacks NF4 too" if nf4_experts else "")
+                              if load_in_4bit
+                              else f"FP8 e4m3 frozen weights computing in {dtype_name}" if load_in_fp8
+                              else f"NVFP4 frozen weights and inputs computing in {dtype_name}" if load_in_nvfp4
+                              else dtype_name))
         return model, tokenizer
 
     @staticmethod
@@ -454,6 +503,9 @@ class MeepLanguageModel:
 
         if getattr(model, "_meepsquared", None) is None:
             raise TypeError("get_peft_model takes a model loaded with meepsquared's from_pretrained")
+        if kwargs.get("target_parameters") and model._meepsquared.get("nf4_experts"):
+            raise ValueError("target_parameters: LoRA on the expert stacks needs them as parameters, and this model "
+                             "holds them as NF4; load it with experts_4bit=False")
         torch.manual_seed(random_state)
         config = LoraConfig(r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout, bias=bias,
                             target_modules=language_model_targets(
@@ -486,6 +538,16 @@ class MeepLanguageModel:
         if fp8:
             # Before the fused kernels attach: they read the base layer as it will be
             _fp8.apply(peft_model)
+        nvfp4 = model._meepsquared.get("nvfp4", False)
+        if nvfp4:
+            if fused_lora is True:
+                raise ValueError("fused_lora=True: the fused LoRA kernels read 16-bit, 4-bit or FP8 base weights, "
+                                 "not NVFP4 ones")
+            _nvfp4.apply(peft_model)
+            if fused_lora == "auto":
+                fused_lora = False
+                if not os.environ.get("MEEPSQUARED_QUIET"):
+                    print("meepsquared: fused LoRA kernels off: the base layers are NVFP4", flush=True)
         if fused_lora == "auto":
             fused_lora, why = _fused_wanted(model)
             if not fused_lora and not os.environ.get("MEEPSQUARED_QUIET"):

@@ -158,11 +158,13 @@ Returns `(model, tokenizer)`.
 | `dtype` | bfloat16, else float16 | The dtype of the weights, or the compute dtype with `load_in_4bit`.
 | `load_in_4bit` | `False` | QLoRA: NF4 weights with double quantization. Needs the `qlora` extra.
 | `load_in_fp8` | `False` | The frozen linear layers of the decoder held as FP8 (e4m3, one scale per tensor) once the adapters are added, their products on the FP8 tensor cores; on a mixture of experts, the expert stacks that carry adapters too, with one scale per expert, dequantized for each product. The routers stay in BF16. Not with `load_in_4bit`; needs compute capability 8.9 or later. See xref:sft.adoc[LoRA and QLoRA] and xref:mixture-of-experts.adoc[Mixture of experts].
+| `load_in_nvfp4` | `False` | The frozen linear layers of the decoder held as NVFP4 by Transformer Engine once the adapters are added, their inputs quantized to NVFP4 too, their forward products on Blackwell's FP4 tensor cores, their inputs' gradients in BF16. Not with `load_in_4bit` or `load_in_fp8`; needs compute capability 10.0 or later and Transformer Engine. See xref:sft.adoc#_frozen_weights_and_their_inputs_in_nvfp4[Frozen weights and their inputs in NVFP4].
 | `attn_implementation` | `"flash_attention_2"` where it runs the model, else `"meepsquared_varlen"`; `"sdpa"` without a CUDA GPU | Padding-free batches need `flash_attention_2`, `flash_attention_3` or `meepsquared_varlen` (PyTorch's memory-efficient kernel with packed sequences; see xref:sft.adoc#_the_attention[The attention]). A value given stands.
 | `liger` | `True` | Liger Kernel's fused layers and loss. A model type Liger has no patches for is refused unless `False`.
 | `loss_chunk_budget` | `32` | The chunk size factor of Liger's fused loss (`chunk_mem_const`). Applies to every model in the process.
 | `device_map` | the process's GPU | `"balanced"` or `"auto"` spread the layers over the GPUs; `"cpu"` for FSDP2. Otherwise GPU `LOCAL_RANK` under `torchrun`, else GPU 0.
 | `quant_storage` | `None` | The dtype the 4-bit weights are packed in; `torch.bfloat16` under FSDP2.
+| `experts_4bit` | `True` | With `load_in_4bit`, the expert stacks of a mixture of experts held as NF4 too; bitsandbytes alone leaves them in 16 bits. `False` keeps them in 16 bits, as LoRA on the stacks (`target_parameters`) needs. See xref:mixture-of-experts.adoc#_expert_stacks_in_nf4[Expert stacks in NF4].
 | `token`, `trust_remote_code` | `None`, `False` | Passed to Transformers.
 | `fast_inference` | `False` | `True` is refused; see xref:grpo.adoc[GRPO].
 | `gpu_memory_utilization`, `max_lora_rank` | | Accepted and not used: they configure only `fast_inference`.

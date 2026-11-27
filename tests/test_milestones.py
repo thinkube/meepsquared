@@ -153,3 +153,90 @@ def test_a_stop_at_a_milestones_step_waits_for_the_milestone(chat_tokenizer, tmp
     result = job.train(stop_file=stop)
     assert result.paused and result.steps == 3
     assert (tmp_path / "out" / "milestones" / "step-3" / "milestone.json").exists()
+
+
+def test_milestones_at_growing_distances_come_often_at_the_start_and_seldom_later():
+    from meepsquared import _milestones
+
+    # The distances grow: 500, 750, 1125, 1687.5, 2531.25, 3796.9, each milestone their sum rounded up
+    assert _milestones.steps(11_931, 500 / 11_931, 1.5) == [500, 1250, 2375, 4063, 6594, 10_391, 11_931]
+    # Each milestone at least one step after the one before: none twice at a small first distance
+    small = _milestones.steps(20, 0.01, 1.2)
+    assert small[:3] == [1, 2, 3] and small == sorted(set(small)) and small[-1] == 20
+    # Without growth, equal distances as before
+    assert _milestones.steps(100, 0.25) == [25, 50, 75, 100]
+    assert "1.5 times the one before" in _milestones.spacing_text(10_000, 0.01, 1.5)
+
+
+def test_milestone_growth_is_above_one_and_needs_milestones():
+    import meepsquared as m2
+
+    for bad in (1, 0.5, True, "2"):
+        with pytest.raises(ValueError, match="milestone_growth must be above 1"):
+            m2.TrainingJob(model="x", data="d.jsonl", milestones=0.01, milestone_growth=bad)
+    with pytest.raises(ValueError, match="give milestones"):
+        m2.TrainingJob(model="x", data="d.jsonl", milestone_growth=1.5)
+    job = m2.TrainingJob(model="x", data="d.jsonl", milestones=0.01, milestone_growth=1.5)
+    assert m2.TrainingJob.from_dict(job.to_dict()).milestone_growth == 1.5
+
+
+def sft_job(**fields):
+    import meepsquared as m2
+
+    return m2.TrainingJob(model="m", data="d.jsonl", **{"milestones": 0.5, **fields})
+
+
+def sft_plan(job):
+    from meepsquared.job import SFT_MEASUREMENTS, Decision, Plan
+
+    placement = {"planned_steps": 1000, "start_step": 0, "estimated_without_milestones": 2000.0,
+                 "milestone_seconds": 60.0, "milestones_what": "the adapter saved apart, and 40 rows answered",
+                 "milestones_why": "", "milestone_value_key": "generation_seconds", "evaluations": 0,
+                 "eval_seconds": 0.0, "evaluations_counted": True}
+    decisions = [Decision("length", "length", 1000, "1 epoch, 1000 steps"),
+                 Decision("duration", "time", 2.0, "old", "timed on 3 steps"),
+                 Decision("memory", "memory", {"peak_gpu_bytes": 1}, "peak 21 GiB", "measured"),
+                 Decision("milestones", "milestones", {"steps": [500, 1000]}, "2 at steps 500, 1,000")]
+    measurements = {"task": "sft", "format": SFT_MEASUREMENTS, "job": job._placement_free(),
+                    "placement": placement, "device": "RTX 3090"}
+    return Plan(model="m", task="sft", method="lora", device="RTX 3090", free_bytes=None, decisions=decisions,
+                seconds_per_step=2.0, estimated_seconds=2120.0, peak_gpu_bytes=1, memory_request_bytes=5,
+                measurements=measurements)
+
+
+def test_an_sft_plan_places_its_milestones_again_without_measuring():
+    from meepsquared.job import Plan
+
+    earlier = Plan.from_dict(sft_plan(sft_job()).to_dict())
+    revised = sft_job(milestones=0.1, milestone_growth=1.5).plan(reuse=earlier, reused_from="plan job j1")
+    assert revised["milestones"].value["steps"] == [100, 250, 475, 813, 1000]
+    assert revised.estimated_seconds == 2000.0 + 5 * 60.0
+    assert revised["duration"].reason == "timed on 3 steps"
+    assert (revised["memory"], revised.memory_request_bytes) == (earlier["memory"], 5)
+    assert revised["measurements"].text.startswith("reused from plan job j1, measured on RTX 3090")
+    # Reused again, the measurements still name the plan that measured them
+    again = sft_job(milestones=None).plan(reuse=revised, reused_from="plan job j2")
+    assert again["milestones"].text == "none" and again["measurements"].value == {"from": "plan job j1"}
+
+
+def test_an_sft_plan_of_another_change_or_without_measured_milestones_measures_again():
+    import meepsquared as m2
+
+    earlier = sft_plan(sft_job())
+    with pytest.raises(m2.MeasureAgain, match="recipe changed"):
+        sft_job(recipe=m2.Recipe(learning_rate=1e-5)).plan(reuse=earlier)
+    earlier.measurements["placement"]["milestones_what"] = ""
+    with pytest.raises(m2.MeasureAgain, match="placed no milestones"):
+        sft_job(milestones=0.1).plan(reuse=earlier)
+    earlier.measurements = None
+    with pytest.raises(m2.MeasureAgain, match="keeps no measurements"):
+        sft_job().plan(reuse=earlier)
+
+
+def test_a_milestone_is_timed_on_rows_spread_over_the_set():
+    from meepsquared import _choice_job
+
+    rows = list(range(1860))
+    sample = _choice_job.milestone_sample(rows)
+    assert len(sample) == _choice_job.MILESTONE_SAMPLE and sample[0] == 0 and sample[-1] > 1800
+    assert _choice_job.milestone_sample(rows[:10]) == rows[:10]

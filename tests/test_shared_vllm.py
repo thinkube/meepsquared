@@ -58,7 +58,7 @@ def test_the_engine_is_for_milestones_with_an_evaluation_and_not_for_qlora():
         m2.Overrides(milestone_engine="hf")
     with pytest.raises(ValueError, match="give milestones and milestone_eval"):
         TrainingJob(model="m", data="d.jsonl", overrides=m2.Overrides(milestone_engine="vllm"))
-    with pytest.raises(ValueError, match="'qlora' holds them in 4 bits"):
+    with pytest.raises(ValueError, match="'qlora' holds its weights in 4 bits"):
         TrainingJob(model="m", data="d.jsonl", method="qlora", milestones=0.1, milestone_eval="e.jsonl",
                     milestone_scorer="s.py:score", overrides=m2.Overrides(milestone_engine="vllm"))
 

@@ -46,7 +46,8 @@ PLAN_FILE = "meepsquared-plan.json"
 SAME_ON_RESUME = ("tokens_per_update", "effective_batch", "micro_batch", "accumulation", "order", "length",
                   "max_length", "padding_free", "answers_only", "evaluation", "data_checks", "source_weights",
                   "rank", "alpha", "dropout", "targets", "experts", "optimizer", "learning_rate", "schedule",
-                  "warmup_steps", "max_grad_norm", "weight_decay", "data")
+                  "warmup_steps", "max_grad_norm", "weight_decay", "data", "choice_head", "set_layers", "none_output", "candidates_per_pass",
+                  "head_learning_rate", "head_only", "start_from")
 # The warm-up steps time_steps runs before it times any
 TIMING_WARMUP = 1
 # The memory a job asks for, over the training's measured peak
@@ -66,13 +67,15 @@ def write_json(path: Path, data: dict) -> None:
 
 
 class Status:
-    """The status file of a training: its state, its step, its last loss, its speed and its last checkpoint."""
+    """The status file of a training: its state, its step, its last loss, its speed and its last checkpoint.
+    milestone_running, while a milestone answers its rows: {"step", "answered", "rows", "started_at"}; null else."""
 
     def __init__(self, path):
         self.path = Path(path)
         self.fields = {"state": "planning", "step": 0, "total_steps": 0, "loss": None, "seconds_per_step": None,
                        "eta_seconds": None, "checkpoint": None, "plan": None, "error": None, "eval_loss": None,
-                       "eval_step": None, "milestones": None, "milestone_seconds": None, "next_milestone": None}
+                       "eval_step": None, "milestones": None, "milestone_seconds": None, "next_milestone": None,
+                       "milestone_running": None}
 
     def update(self, **fields) -> None:
         unknown = set(fields) - set(self.fields)
@@ -452,6 +455,19 @@ def memory_request(timing: Timing) -> tuple:
         how = "the host's peak; the GPU has memory of its own"
     request = math.ceil(peak * (1 + MEMORY_MARGIN) / 2**30) * 2**30
     return request, f"{how}, {MEMORY_MARGIN:.0%} over it, rounded up to a whole GiB"
+
+
+def time_line(seconds_per_step: float, estimated: float, steps: int, evaluations: int = 0, eval_seconds: float = 0.0,
+              milestones: int = 0, milestone_seconds: float = 0.0, evaluations_counted: bool = True) -> str:
+    """The plan's time: per step, in all, and the share of the evaluations and of the milestones."""
+    text = f"about {seconds_per_step:.3g} s per step, {duration_text(estimated)} for {steps} steps"
+    if evaluations:
+        text += f" with {evaluations} evaluations ({duration_text(eval_seconds)} of it)"
+    if milestone_seconds:
+        text += f" and {milestones} milestones ({duration_text(milestone_seconds)} of it)"
+    if not evaluations_counted:
+        text += "; the evaluations not counted"
+    return text
 
 
 def duration_text(seconds: float) -> str:
