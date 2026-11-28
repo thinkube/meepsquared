@@ -19,8 +19,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The choice kind: LoRA adapters with PEFT, and the base's 4-bit weights with bitsandbytes on a GPU
-choice = ["peft>=0.21.2,<0.22", "bitsandbytes>=0.50"]
+# The choice kind: LoRA adapters with PEFT, and the base's 4-bit weights with bitsandbytes (placed on the GPU by Accelerate)
+choice = ["peft>=0.21.2,<0.22", "bitsandbytes>=0.50", "accelerate>=1.15"]
 test = ["pytest>=8", "peft>=0.21.2,<0.22"]
 
 # The kinds of trained part this package serves; another package adds its own kinds under the same group
