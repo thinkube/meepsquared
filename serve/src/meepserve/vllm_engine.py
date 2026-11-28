@@ -65,6 +65,26 @@ def _drop(path: str, cleanup) -> None:
     cleanup(path)
 
 
+def _no_bnb_load_of_the_extraction() -> None:
+    """vLLM loads the extraction's model (ExtractHiddenStatesModel) with the loader of the base's load format, so
+    with a 4-bit base the bitsandbytes plugin's loader, which refuses a model with no linear layer to quantize. That
+    model holds no weights: its loading is nothing to do, and the loader is not run on it."""
+    from vllm.model_executor.models.extract_hidden_states import ExtractHiddenStatesModel
+    from vllm_bnb_plugin.bitsandbytes_loader import BitsAndBytesModelLoader
+
+    if getattr(BitsAndBytesModelLoader, "_meepserve_skips_extraction", False):
+        return
+    real = BitsAndBytesModelLoader.load_weights
+
+    def load_weights(self, model, model_config):
+        if isinstance(model, ExtractHiddenStatesModel):
+            return None
+        return real(self, model, model_config)
+
+    BitsAndBytesModelLoader.load_weights = load_weights
+    BitsAndBytesModelLoader._meepserve_skips_extraction = True
+
+
 def _text_config(config: dict) -> dict:
     return config.get("text_config") or config
 
@@ -108,12 +128,7 @@ class VllmBase:
                                            "allow_custom_save_path": True}))
         if weights == "nf4":
             kwargs["quantization"] = "bitsandbytes"
-            # The extraction's model is a copy of the base's config, so the bitsandbytes loader loads it too, and
-            # refuses a model without packed_modules_mapping. It holds no weights: none of it is packed or quantized
-            from vllm.model_executor.models.extract_hidden_states import ExtractHiddenStatesModel
-
-            if not hasattr(ExtractHiddenStatesModel, "packed_modules_mapping"):
-                ExtractHiddenStatesModel.packed_modules_mapping = {}
+            _no_bnb_load_of_the_extraction()
         try:
             self.llm = LLM(**kwargs)
         except Exception as e:
