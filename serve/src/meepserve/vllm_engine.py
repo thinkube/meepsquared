@@ -3,7 +3,7 @@
 
 """The vllm engine: a causal language model base held once by vLLM, for generation and for a choice head's states.
 
-One vLLM instance (in this process) holds the base, with LoRA enabled and
+One vLLM instance holds the base, with LoRA enabled and
 prefix caching on, and with vLLM's hidden-state extraction (the speculative
 method extract_hidden_states, its states written per request by
 ExampleHiddenStatesConnector): every request saves the hidden states of its
@@ -14,6 +14,11 @@ computed once and found in the prefix cache by the other candidates. The
 state is the last layer's output before the final norm, which this engine
 applies as Transformers' text model does (meepserve.choice reads the
 normed state).
+
+vLLM's engine core runs in its own process, as vLLM runs it by default: the
+connector writes a request's states in an engine step after the request
+ends, and an engine core inside this process takes no step once generate
+has returned, so a reader would wait on the states for ever.
 
 Weights (the part's meepserve.json): "nf4", bitsandbytes' 4-bit NF4
 quantized as vLLM loads the base (vllm-bnb-plugin; its in-flight
@@ -100,7 +105,6 @@ class VllmBase:
             raise PartError(f"the vllm engine holds a base with weights {list(WEIGHTS)}, not {weights!r}")
         if not torch.cuda.is_available():
             raise PartError("the vllm engine runs on a CUDA GPU")
-        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
         from transformers import AutoTokenizer
         from vllm import LLM
         from vllm.config.kv_transfer import KVTransferConfig
@@ -111,7 +115,9 @@ class VllmBase:
         text = _text_config(config)
         self.layers, self.hidden = int(text["num_hidden_layers"]), int(text["hidden_size"])
         self.eps = float(text.get("rms_norm_eps", 1e-6))
-        self.norm = self._final_norm().to(self.device)
+        # On the CPU until vLLM has started its engine core: CUDA set up in this process first makes vLLM start it by
+        # spawn, which imports the server's module again
+        norm = self._final_norm()
         self.tokenizer = AutoTokenizer.from_pretrained(str(self.path), legacy=False)
         if self.tokenizer.pad_token_id is None:
             raise PartError(f"the tokenizer of {path} has no pad token")
@@ -135,6 +141,7 @@ class VllmBase:
         except Exception as e:
             shutil.rmtree(self.states_dir, ignore_errors=True)
             raise PartError(f"vLLM did not start on {path}: {type(e).__name__}: {e}") from e
+        self.norm = norm.to(self.device)
         self.adapters = {}  # name -> (id, folder)
         self._made = 0
         self._lock = threading.Lock()
