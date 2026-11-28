@@ -7,7 +7,8 @@ One vLLM instance holds the base, with LoRA enabled and
 prefix caching on, and with vLLM's hidden-state extraction (the speculative
 method extract_hidden_states, its states written per request by
 ExampleHiddenStatesConnector): every request saves the hidden states of its
-prompt's tokens after the last layer. A choice part reads, for each
+prompt's tokens after the last layer, of which meepserve.vllm_connector
+keeps the block that holds the last token. A choice part reads, for each
 candidate, the state of the last token of the shared text and the
 candidate's own text, read with the part's adapter: the shared text is
 computed once and found in the prefix cache by the other candidates. The
@@ -161,7 +162,8 @@ class VllmBase:
                                 "draft_model_config": {"hf_config": {
                                     "eagle_aux_hidden_state_layer_ids": [self.layers]}}},
             kv_transfer_config=KVTransferConfig(
-                kv_connector="ExampleHiddenStatesConnector", kv_role="kv_producer",
+                kv_connector="LastStateConnector", kv_connector_module_path="meepserve.vllm_connector",
+                kv_role="kv_producer",
                 kv_connector_extra_config={"shared_storage_path": str(self.states_dir),
                                            "allow_custom_save_path": True}))
         if weights == "nf4":
@@ -251,12 +253,12 @@ class VllmBase:
                     data = load_hidden_states(saved)
                 finally:
                     cleanup_hidden_states(saved)
+                # The rows of the block that holds the last prompt token, up to it (meepserve.vllm_connector)
                 states, ids = data["hidden_states"], data["token_ids"]
-                if states.shape[0] != len(prompt) or states.shape[-1] != self.hidden:
-                    raise PartError(f"vLLM saved states of shape {tuple(states.shape)} for a prompt of {len(prompt)} "
-                                    f"tokens of width {self.hidden}")
-                if int(ids[-1]) != prompt[-1]:
-                    raise PartError("vLLM saved the states of other tokens than the prompt's")
+                if (states.shape[0] != ids.shape[0] or states.shape[-1] != self.hidden or not ids.numel()
+                        or ids.tolist() != prompt[len(prompt) - ids.shape[0]:]):
+                    raise PartError(f"vLLM saved states of shape {tuple(states.shape)} for tokens that are not the end "
+                                    f"of the prompt of {len(prompt)} tokens")
                 found.append(states[-1, 0])
         last = torch.stack(found).to(self.device).float()
         normed = last * torch.pow(last.pow(2).mean(-1, keepdim=True) + self.eps, -0.5) * self.norm
