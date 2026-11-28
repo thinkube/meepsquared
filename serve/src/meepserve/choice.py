@@ -38,7 +38,6 @@ Request and answer (see ChoicePart.answer):
 head with a none output and refused by one without.
 """
 
-import copy
 import json
 import math
 from dataclasses import dataclass
@@ -203,32 +202,14 @@ class ChoicePart:
         self.adapter, self.head, self.per_pass, self.engine = adapter, head, per_pass, engine
         self.none_output = "none_output" in head
 
-    def _suffix(self, decoder, cache, prefix_len: int, own: list) -> torch.Tensor:
-        device = self.engine.device
-        c = copy.copy(cache)
-        c.layers = [copy.copy(layer) for layer in cache.layers]
-        c.batch_repeat_interleave(len(own))
-        width = max(map(len, own))
-        pad = self.engine.tokenizer.pad_token_id
-        x = torch.tensor([o + [pad] * (width - len(o)) for o in own], device=device)
-        m = torch.tensor([[1] * (prefix_len + len(o)) + [0] * (width - len(o)) for o in own], device=device)
-        h = decoder(input_ids=x, attention_mask=m, past_key_values=c, use_cache=True).last_hidden_state
-        return h[torch.arange(len(own), device=device), torch.tensor([len(o) - 1 for o in own], device=device)]
-
-    def leaves(self, decoder, shared: list, own: list) -> torch.Tensor:
-        """The last state of each candidate's reading, the shared text read once."""
-        out = decoder(input_ids=torch.tensor([shared], device=self.engine.device), use_cache=True)
-        cache = out.past_key_values
-        return torch.cat([self._suffix(decoder, cache, len(shared), own[s:s + self.per_pass])
-                          for s in range(0, len(own), self.per_pass)])
-
     def ask(self, questions: list) -> list:
         tokenizer = self.engine.tokenizer
         found = []
-        with self.engine.reading(self.adapter) as decoder:
+        with torch.no_grad():
             for question in questions:
                 shared, own = encode(tokenizer, question["prompt"], question["candidates"])
-                z, states = outputs(self.head, self.leaves(decoder, shared, own))
+                leaves = self.engine.candidate_states(self.adapter, shared, own, self.per_pass)
+                z, states = outputs(self.head, leaves)
                 none = question.get("none")
                 best, probability = choose(self.head, z, states, none)
                 found.append({"chosen": best, "probability": probability,
@@ -276,6 +257,11 @@ def load(folder: Path, contract: dict, engine) -> ChoicePart:
     if contract.get("weights") != METHOD_WEIGHTS[method]:
         raise PartError(f"{folder}: trained with method {method}, on weights {METHOD_WEIGHTS[method]}, and "
                         f"{CONTRACT} names the weights {contract.get('weights')!r}")
+    from meepserve import engine_name
+
+    if engine.name != engine_name(contract):
+        raise PartError(f"{folder}: {CONTRACT} names the engine {engine_name(contract)}, and the base is held by the "
+                        f"{engine.name} engine")
     if engine.weights != METHOD_WEIGHTS[method]:
         raise PartError(f"{folder}: trained on weights {METHOD_WEIGHTS[method]}, and the engine holds the base with "
                         f"weights {engine.weights}")
@@ -306,7 +292,7 @@ def load(folder: Path, contract: dict, engine) -> ChoicePart:
                 raise PartError(f"{folder}: the head's {name} is {tuple(value.shape)}, and the base makes it "
                                 f"{tuple(own[name].shape)}")
             own[name].copy_(value.float())
-    adapter = engine.add_lora(rank, alpha, names, load_file(str(folder / ADAPTER_FILE)))
+    adapter = engine.add_lora(folder, rank, alpha, names, load_file(str(folder / ADAPTER_FILE)))
     return ChoicePart(adapter, head.to(engine.device).eval(), per_pass, engine)
 
 
@@ -320,4 +306,5 @@ class _Kind:
         return load(folder, contract, engine)
 
 
-KIND = _Kind("choice", FORMATS, "causal")
+# The engines a choice part runs on; its meepserve.json's "engine" names one, "causal" when it names none
+KIND = _Kind("choice", FORMATS, ("causal", "vllm"))

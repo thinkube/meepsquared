@@ -73,8 +73,13 @@ kind's adapter applied. The kind does not know which engine runs it.
   (bitsandbytes, computing in bfloat16) or bfloat16 as the part's training
   held it; LoRA adapters with PEFT on the language model's layers, switchable
   by name. One question at a time.
-- `vllm` (with the choice kind, next): the base held once for generation and for the
-  choice head's states (serving-generation-and-choice.md).
+- `vllm` (with the choice kind): the base held once by vLLM 0.32 for generation
+  and for the choice head's states, which vLLM's hidden-state extraction
+  (extract_hidden_states) saves per request: each candidate is read whole,
+  the shared text found in the prefix cache, and the engine applies the
+  final norm to the last layer's state. No second model shares the weights,
+  as serving-generation-and-choice.md planned when vLLM gave no states with
+  generation. A part names it in meepserve.json ("engine": "vllm").
 
 ### The gateway
 
@@ -133,4 +138,5 @@ Any other tagger:
    own test scores (test.json) through the gateway.
 5. The choice kind on the causal engine; checked by a milestone's rows
    answered through the gateway against the milestone's own answers.
-6. The vLLM engine for the choice kind (the serving plan's Step 2).
+6. The vllm engine for the choice kind; checked as step 5, against the
+   milestone's answers.

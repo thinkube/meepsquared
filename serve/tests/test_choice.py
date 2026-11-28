@@ -182,3 +182,15 @@ def test_load_refusals(causal, tmp_path):
     (folder / "meepserve.json").write_text(json.dumps(contract))
     with pytest.raises(PartError, match="'weights' is required"):
         meepserve.load(folder, causal, device="cpu")
+
+
+def test_the_contract_names_one_of_the_kinds_engines(causal, tmp_path):
+    folder = write_part(tmp_path / "e", causal)
+    contract = json.loads((folder / "meepserve.json").read_text())
+    contract["engine"] = "tensorrt"
+    (folder / "meepserve.json").write_text(json.dumps(contract))
+    with pytest.raises(PartError, match="names the engine 'tensorrt'"):
+        meepserve.load(folder, causal, device="cpu")
+    contract["engine"] = "causal"
+    (folder / "meepserve.json").write_text(json.dumps(contract))
+    assert meepserve.load(folder, causal, device="cpu").answer({"questions": QUESTIONS})["answers"]

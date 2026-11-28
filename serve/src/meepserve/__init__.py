@@ -11,8 +11,9 @@ with a contract file, meepserve.json:
 
 kind names the kind that reads and runs it (see kinds()); format, the
 version of the kind's files, which the kind must know; base, the catalogue id
-of the base model; weights, for a kind on the causal engine, the weights its
-base is held in (see meepserve.causal). The base's own files are given apart, as a folder.
+of the base model; weights, for a kind on the causal or vllm engine, the
+weights its base is held in (see meepserve.causal); engine, for a kind that
+runs on several, the one it runs on (see engine_name). The base's own files are given apart, as a folder.
 
     import meepserve
     part = meepserve.load("parts/ja-parse", "models/xlm-roberta-large")
@@ -62,21 +63,36 @@ def read_contract(folder) -> dict:
     return contract
 
 
-def engine_for(contract: dict, base, device: Optional[str] = None):
-    """A new engine of the kind's for the base folder `base`."""
+def engine_name(contract: dict) -> str:
+    """The engine a part runs on: its kind's, or for a kind with several, the one its contract's "engine" names (the
+    first of the kind's when it names none)."""
     kind = _kind(contract)
-    if kind.engine == "transformers":
+    engines = (kind.engine,) if isinstance(kind.engine, str) else tuple(kind.engine)
+    chosen = contract.get("engine", engines[0])
+    if chosen not in engines:
+        raise PartError(f"{CONTRACT} names the engine {chosen!r}; the kind {kind.name} runs on {list(engines)}")
+    return chosen
+
+
+def engine_for(contract: dict, base, device: Optional[str] = None):
+    """A new engine of the part's (engine_name) for the base folder `base`."""
+    kind, chosen = _kind(contract), engine_name(contract)
+    if chosen == "transformers":
         from meepserve.engine import TransformersEncoder
 
         return TransformersEncoder(base, device)
-    if kind.engine == "causal":
-        from meepserve.causal import CausalBase
-
+    if chosen in ("causal", "vllm"):
         if not isinstance(contract.get("weights"), str):
-            raise PartError(f"the kind {kind.name} runs on the causal engine, whose base's weights the part's "
+            raise PartError(f"the kind {kind.name} runs on the {chosen} engine, whose base's weights the part's "
                             f"{CONTRACT} names: 'weights' is required (see meepserve.causal)")
-        return CausalBase(base, contract["weights"], device)
-    raise PartError(f"the kind {kind.name} runs on the engine {kind.engine!r}, which this package does not have")
+        if chosen == "causal":
+            from meepserve.causal import CausalBase
+
+            return CausalBase(base, contract["weights"], device)
+        from meepserve.vllm_engine import VllmBase
+
+        return VllmBase(base, contract["weights"], device)
+    raise PartError(f"the kind {kind.name} runs on the engine {chosen!r}, which this package does not have")
 
 
 def load(folder, base=None, device: Optional[str] = None, engine=None):

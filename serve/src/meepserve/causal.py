@@ -11,13 +11,15 @@ trained on its weights reads the same weights here:
 - weights "bf16" (Meep²'s method lora): bfloat16.
 
 Attention is PyTorch's SDPA, as the choice training reads its candidates
-after the shared cache with a mask. The adapters are LoRA (PEFT) on the
-language model's linear layers named by the part, outside the vision, audio
-and image modules; each part's adapter is kept under a name the engine gives,
-so several parts share one copy of the base.
+after the shared cache with a mask; a choice part reads them through
+candidate_states. The adapters are LoRA (PEFT) on the language model's
+linear layers named by the part, outside the vision, audio and image
+modules; each part's adapter is kept under a name the engine gives, so
+several parts share one copy of the base.
 """
 
 import contextlib
+import copy
 from typing import Optional
 
 import torch
@@ -88,7 +90,7 @@ class CausalBase:
                 found.append(n)
         return found
 
-    def add_lora(self, rank: int, alpha, names: list, state: dict) -> str:
+    def add_lora(self, folder, rank: int, alpha, names: list, state: dict) -> str:
         """A LoRA adapter of `rank` and `alpha` on the layers `names` (see targets), its weights `state` as PEFT
         saves them; every name of the state must be the adapter's and every one of the adapter's in the state.
         Returns the adapter's name in the engine."""
@@ -133,6 +135,27 @@ class CausalBase:
     def names(self) -> list:
         """The names of the adapters the engine holds."""
         return list(self.peft.peft_config) if self.peft is not None else []
+
+    def _suffix(self, decoder, cache, prefix_len: int, own: list) -> torch.Tensor:
+        c = copy.copy(cache)
+        c.layers = [copy.copy(layer) for layer in cache.layers]
+        c.batch_repeat_interleave(len(own))
+        width = max(map(len, own))
+        pad = self.tokenizer.pad_token_id
+        x = torch.tensor([o + [pad] * (width - len(o)) for o in own], device=self.device)
+        m = torch.tensor([[1] * (prefix_len + len(o)) + [0] * (width - len(o)) for o in own], device=self.device)
+        h = decoder(input_ids=x, attention_mask=m, past_key_values=c, use_cache=True).last_hidden_state
+        return h[torch.arange(len(own), device=self.device), torch.tensor([len(o) - 1 for o in own],
+                                                                           device=self.device)]
+
+    def candidate_states(self, adapter: str, shared: list, own: list, per_pass: int) -> torch.Tensor:
+        """The last state of each candidate's reading with `adapter`: the shared tokens read once with the cache on,
+        the cache copied for each group of per_pass candidates, read after it right-padded."""
+        with self.reading(adapter) as decoder:
+            out = decoder(input_ids=torch.tensor([shared], device=self.device), use_cache=True)
+            cache = out.past_key_values
+            return torch.cat([self._suffix(decoder, cache, len(shared), own[s:s + per_pass])
+                              for s in range(0, len(own), per_pass)])
 
     @contextlib.contextmanager
     def reading(self, name: str):

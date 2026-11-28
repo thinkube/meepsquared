@@ -21,6 +21,8 @@ dependencies = [
 [project.optional-dependencies]
 # The choice kind: LoRA adapters with PEFT, and the base's 4-bit weights with bitsandbytes (placed on the GPU by Accelerate)
 choice = ["peft>=0.21.2,<0.22", "bitsandbytes>=0.50", "accelerate>=1.15"]
+# The choice kind on the vllm engine: the base held by vLLM 0.32, its 4-bit weights by the bitsandbytes plugin
+vllm = ["vllm>=0.32,<0.33", "vllm-bnb-plugin>=0.0.3"]
 test = ["pytest>=8", "peft>=0.21.2,<0.22"]
 
 # The kinds of trained part this package serves; another package adds its own kinds under the same group
