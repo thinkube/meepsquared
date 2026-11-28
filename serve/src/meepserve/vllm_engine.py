@@ -59,6 +59,8 @@ MAX_LORA_RANK = 64
 MAX_LORAS = 4
 # The block of weights each NF4 scale covers in a Transformers model loaded in 4 bits (bitsandbytes' Linear4bit)
 NF4_BLOCKSIZE = 64
+# A LoRA adapter's files, in PEFT's format
+ADAPTER_CONFIG, ADAPTER_FILE = "adapter_config.json", "adapter_model.safetensors"
 # The final norm's weight in the checkpoint, by the ends of the names a causal LM gives it
 FINAL_NORMS = ("language_model.norm.weight", "model.norm.weight")
 
@@ -123,6 +125,16 @@ def register() -> None:
     BitsAndBytesModelLoader._meepserve = True
 
 
+def _k_eq_v_layers(text: dict) -> set:
+    """The layers whose values are their keys (attention_k_eq_v: the full-attention layers, but for those sharing
+    another layer's keys and values, which have no k_proj)."""
+    if not text.get("attention_k_eq_v"):
+        return set()
+    types = text.get("layer_types") or []
+    first_shared = int(text["num_hidden_layers"]) - int(text.get("num_kv_shared_layers") or 0)
+    return {i for i, kind in enumerate(types[:first_shared]) if kind == "full_attention"}
+
+
 def _text_config(config: dict) -> dict:
     return config.get("text_config") or config
 
@@ -146,6 +158,7 @@ class VllmBase:
         config = json.loads((self.path / "config.json").read_text())
         text = _text_config(config)
         self.layers, self.hidden = int(text["num_hidden_layers"]), int(text["hidden_size"])
+        self.k_eq_v_layers = _k_eq_v_layers(text)
         self.eps = float(text.get("rms_norm_eps", 1e-6))
         # On the CPU until vLLM has started its engine core: CUDA set up in this process first makes vLLM start it by
         # spawn, which imports the server's module again
@@ -154,6 +167,7 @@ class VllmBase:
         if self.tokenizer.pad_token_id is None:
             raise PartError(f"the tokenizer of {path} has no pad token")
         self.states_dir = Path(tempfile.mkdtemp(prefix="meepserve-states-", dir="/dev/shm"))
+        self.adapters_dir = Path(tempfile.mkdtemp(prefix="meepserve-adapters-"))
         kwargs = dict(
             model=str(self.path), dtype="bfloat16", enable_lora=True, max_lora_rank=MAX_LORA_RANK,
             max_loras=MAX_LORAS, enable_prefix_caching=True, kv_cache_memory_bytes=KV_CACHE_BYTES,
@@ -172,7 +186,7 @@ class VllmBase:
         try:
             self.llm = LLM(**kwargs)
         except Exception as e:
-            shutil.rmtree(self.states_dir, ignore_errors=True)
+            self.close()
             raise PartError(f"vLLM did not start on {path}: {type(e).__name__}: {e}") from e
         self.norm = norm.to(self.device)
         self.adapters = {}  # name -> (id, folder)
@@ -200,8 +214,36 @@ class VllmBase:
             raise PartError(f"the vllm engine holds {MAX_LORAS} adapters already")
         self._made += 1
         name = f"part-{self._made}"
+        if self.k_eq_v_layers:
+            folder = self._values_as_keys(Path(folder), state, name)
         self.adapters[name] = (self._made, str(folder))
         return name
+
+    def _values_as_keys(self, folder: Path, state: dict, name: str) -> Path:
+        """The adapter in a folder of the engine's, with a v_proj LoRA equal to the k_proj LoRA in each layer whose
+        values are its keys (attention_k_eq_v): there vLLM loads k_proj's weights into both the K and V slots of its
+        fused qkv projection and applies k_proj's LoRA to K alone, where Transformers takes V as K's projection, its
+        LoRA in it. A layer's v_proj LoRA in the adapter is refused: that layer has no v_proj."""
+        from safetensors.torch import save_file
+
+        out = dict(state)
+        for i in sorted(self.k_eq_v_layers):
+            k = [key for key in state if f".layers.{i}.self_attn.k_proj.lora_" in key]
+            if any(f".layers.{i}.self_attn.v_proj.lora_" in key for key in state):
+                raise PartError(f"the adapter has a v_proj LoRA in layer {i}, whose values are its keys: it has no "
+                                "v_proj")
+            for key in k:
+                out[key.replace(".self_attn.k_proj.", ".self_attn.v_proj.")] = state[key]
+        # On disk: an adapter is tens of MB, more than a pod's /dev/shm
+        target = self.adapters_dir / name
+        target.mkdir()
+        save_file({k: v.contiguous() for k, v in out.items()}, str(target / ADAPTER_FILE))
+        config = json.loads((folder / ADAPTER_CONFIG).read_text())
+        modules = config.get("target_modules") or []
+        if isinstance(modules, list) and "k_proj" in modules and "v_proj" not in modules:
+            config["target_modules"] = modules + ["v_proj"]
+        (target / ADAPTER_CONFIG).write_text(json.dumps(config))
+        return target
 
     def remove_lora(self, name: str) -> None:
         if name not in self.adapters:
@@ -288,3 +330,4 @@ class VllmBase:
 
     def close(self) -> None:
         shutil.rmtree(self.states_dir, ignore_errors=True)
+        shutil.rmtree(self.adapters_dir, ignore_errors=True)
