@@ -194,3 +194,17 @@ def test_the_contract_names_one_of_the_kinds_engines(causal, tmp_path):
     contract["engine"] = "causal"
     (folder / "meepserve.json").write_text(json.dumps(contract))
     assert meepserve.load(folder, causal, device="cpu").answer({"questions": QUESTIONS})["answers"]
+
+
+def test_states_and_the_base_alone(causal, tmp_path):
+    part = meepserve.load(write_part(tmp_path / "s", causal), causal, device="cpu")
+    with_adapter = part.answer({"questions": QUESTIONS[:1], "states": True})["answers"][0]
+    alone = part.answer({"questions": QUESTIONS[:1], "states": True, "adapter": False})["answers"][0]
+    k = len(QUESTIONS[0]["candidates"])
+    assert len(with_adapter["states"]) == k and len(with_adapter["states"][0]) == HIDDEN
+    assert len(with_adapter["scores"]) == k
+    assert with_adapter["states"] != pytest.approx(alone["states"], abs=1e-4)
+    assert part.answer({"questions": QUESTIONS[:1]})["answers"][0]["probabilities"] == pytest.approx(
+        with_adapter["probabilities"], abs=1e-6)
+    with pytest.raises(PartError, match="true or false"):
+        part.answer({"questions": QUESTIONS[:1], "states": "yes"})

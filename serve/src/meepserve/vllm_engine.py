@@ -224,7 +224,7 @@ class VllmBase:
 
     # Reading and generating
 
-    def candidate_states(self, adapter: str, shared: list, own: list, per_pass: int) -> torch.Tensor:
+    def candidate_states(self, adapter: Optional[str], shared: list, own: list, per_pass: int) -> torch.Tensor:
         """The state of the last token of the shared text and each candidate's own text: each read whole, the shared
         text found in the prefix cache after its first reading (per_pass does not apply: vLLM batches them)."""
         return self.last_states(adapter, [shared + o for o in own])

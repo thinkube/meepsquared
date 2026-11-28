@@ -202,18 +202,22 @@ class ChoicePart:
         self.adapter, self.head, self.per_pass, self.engine = adapter, head, per_pass, engine
         self.none_output = "none_output" in head
 
-    def ask(self, questions: list) -> list:
+    def ask(self, questions: list, give_states: bool = False, adapter: bool = True) -> list:
         tokenizer = self.engine.tokenizer
         found = []
         with torch.no_grad():
             for question in questions:
                 shared, own = encode(tokenizer, question["prompt"], question["candidates"])
-                leaves = self.engine.candidate_states(self.adapter, shared, own, self.per_pass)
+                leaves = self.engine.candidate_states(self.adapter if adapter else None, shared, own, self.per_pass)
                 z, states = outputs(self.head, leaves)
                 none = question.get("none")
                 best, probability = choose(self.head, z, states, none)
-                found.append({"chosen": best, "probability": probability,
-                              "probabilities": probabilities(self.head, z, states, none)})
+                answer = {"chosen": best, "probability": probability,
+                          "probabilities": probabilities(self.head, z, states, none)}
+                if give_states:
+                    answer["scores"] = [float(x) for x in z]
+                    answer["states"] = leaves.float().cpu().tolist()
+                found.append(answer)
         return found
 
     def close(self) -> None:
@@ -224,19 +228,24 @@ class ChoicePart:
         self.head = None
 
     def answer(self, request: dict) -> dict:
-        """{"questions": [...]} -> {"answers": [...]} (see the module's docstring)."""
+        """{"questions": [...]} -> {"answers": [...]} (see the module's docstring). To compare two engines' reading of
+        the same part: "states": true adds to each answer the head's scores and the state it read of each candidate
+        (the base's normed last state, float32); "adapter": false reads with the base alone, the adapter off."""
         if self.head is None:
             raise PartError("the part is closed")
         given = {k: v for k, v in request.items() if k != "model"}
-        unknown = sorted(set(given) - {"questions"})
+        unknown = sorted(set(given) - {"questions", "states", "adapter"})
         if unknown:
-            raise PartError(f"a choice part takes 'questions' only, not {unknown}")
+            raise PartError(f"a choice part takes 'questions', 'states' and 'adapter', not {unknown}")
+        give_states, adapter = given.get("states", False), given.get("adapter", True)
+        if not isinstance(give_states, bool) or not isinstance(adapter, bool):
+            raise PartError("'states' and 'adapter' are true or false")
         questions = given.get("questions")
         if not isinstance(questions, list) or not questions:
             raise PartError("'questions' must be a list of questions")
         for i, question in enumerate(questions):
             check_question(question, i, self.none_output)
-        return {"answers": self.ask(questions)}
+        return {"answers": self.ask(questions, give_states, adapter)}
 
 
 def _whole(value) -> bool:

@@ -148,7 +148,7 @@ class CausalBase:
         return h[torch.arange(len(own), device=self.device), torch.tensor([len(o) - 1 for o in own],
                                                                            device=self.device)]
 
-    def candidate_states(self, adapter: str, shared: list, own: list, per_pass: int) -> torch.Tensor:
+    def candidate_states(self, adapter: Optional[str], shared: list, own: list, per_pass: int) -> torch.Tensor:
         """The last state of each candidate's reading with `adapter`: the shared tokens read once with the cache on,
         the cache copied for each group of per_pass candidates, read after it right-padded."""
         with self.reading(adapter) as decoder:
@@ -158,13 +158,19 @@ class CausalBase:
                               for s in range(0, len(own), per_pass)])
 
     @contextlib.contextmanager
-    def reading(self, name: str):
-        """While inside: the adapter `name` active, no gradients, and bfloat16 autocast on a GPU; gives the decoder."""
+    def reading(self, name: Optional[str]):
+        """While inside: the adapter `name` active (None: the base alone, every adapter off), no gradients, and
+        bfloat16 autocast on a GPU; gives the decoder."""
+        autocast = torch.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.device.type == "cuda")
+        if name is None:
+            off = self.peft.disable_adapter() if self.peft is not None else contextlib.nullcontext()
+            with off, torch.no_grad(), autocast:
+                yield self.decoder()
+            return
         if self.peft is None or name not in self.peft.peft_config:
             raise PartError(f"the engine holds no adapter named {name}")
         self.peft.set_adapter(name)
         for p in self.peft.parameters():
             p.requires_grad_(False)
-        with torch.no_grad(), torch.autocast(self.device.type, dtype=torch.bfloat16,
-                                             enabled=self.device.type == "cuda"):
+        with torch.no_grad(), autocast:
             yield self.decoder()
