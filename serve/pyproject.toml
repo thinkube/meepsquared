@@ -19,11 +19,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+# The choice kind: LoRA adapters with PEFT, and the base's 4-bit weights with bitsandbytes on a GPU
+choice = ["peft>=0.21.2,<0.22", "bitsandbytes>=0.50"]
+test = ["pytest>=8", "peft>=0.21.2,<0.22"]
 
 # The kinds of trained part this package serves; another package adds its own kinds under the same group
 [project.entry-points."meepserve.kinds"]
 tagger = "meepserve.tagger:KIND"
+choice = "meepserve.choice:KIND"
 
 [project.urls]
 Repository = "https://github.com/thinkube/meepsquared"

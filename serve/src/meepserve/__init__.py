@@ -7,10 +7,12 @@ A part is a folder of trained weights for a base model (adapters, heads),
 with a contract file, meepserve.json:
 
     {"kind": "tagger", "format": 1, "base": "FacebookAI/xlm-roberta-large"}
+    {"kind": "choice", "format": 1, "base": "google/gemma-4-12B-it", "weights": "nf4"}
 
 kind names the kind that reads and runs it (see kinds()); format, the
 version of the kind's files, which the kind must know; base, the catalogue id
-of the base model. The base's own files are given apart, as a folder.
+of the base model; weights, for a kind on the causal engine, the weights its
+base is held in (see meepserve.causal). The base's own files are given apart, as a folder.
 
     import meepserve
     part = meepserve.load("parts/ja-parse", "models/xlm-roberta-large")
@@ -67,6 +69,13 @@ def engine_for(contract: dict, base, device: Optional[str] = None):
         from meepserve.engine import TransformersEncoder
 
         return TransformersEncoder(base, device)
+    if kind.engine == "causal":
+        from meepserve.causal import CausalBase
+
+        if not isinstance(contract.get("weights"), str):
+            raise PartError(f"the kind {kind.name} runs on the causal engine, whose base's weights the part's "
+                            f"{CONTRACT} names: 'weights' is required (see meepserve.causal)")
+        return CausalBase(base, contract["weights"], device)
     raise PartError(f"the kind {kind.name} runs on the engine {kind.engine!r}, which this package does not have")
 
 
