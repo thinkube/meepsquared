@@ -108,6 +108,12 @@ class VllmBase:
                                            "allow_custom_save_path": True}))
         if weights == "nf4":
             kwargs["quantization"] = "bitsandbytes"
+            # The extraction's model is a copy of the base's config, so the bitsandbytes loader loads it too, and
+            # refuses a model without packed_modules_mapping. It holds no weights: none of it is packed or quantized
+            from vllm.model_executor.models.extract_hidden_states import ExtractHiddenStatesModel
+
+            if not hasattr(ExtractHiddenStatesModel, "packed_modules_mapping"):
+                ExtractHiddenStatesModel.packed_modules_mapping = {}
         try:
             self.llm = LLM(**kwargs)
         except Exception as e:
