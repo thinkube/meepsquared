@@ -233,7 +233,8 @@ class VllmBase:
                 raise PartError(f"the adapter has a v_proj LoRA in layer {i}, whose values are its keys: it has no "
                                 "v_proj")
             for key in k:
-                out[key.replace(".self_attn.k_proj.", ".self_attn.v_proj.")] = state[key]
+                # A tensor of its own: safetensors writes no two names for one tensor
+                out[key.replace(".self_attn.k_proj.", ".self_attn.v_proj.")] = state[key].clone()
         # On disk: an adapter is tens of MB, more than a pod's /dev/shm
         target = self.adapters_dir / name
         target.mkdir()
