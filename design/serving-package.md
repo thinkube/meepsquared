@@ -53,9 +53,13 @@ First kinds:
   (its config's input "one character per piece"), one vocabulary piece per
   character with a run of spaces as "▁", in windows of 500 pieces that overlap
   by 100.
-- `choice` (next): the LoRA adapter and the set head of Meep²'s choice task,
-  in the format Meep² saves (adapter_model.safetensors, head.safetensors,
-  choice.json).
+- `choice`: the LoRA adapter and the set head of Meep²'s choice task, in the
+  format Meep² saves (adapter_model.safetensors, head.safetensors,
+  choice.json), on the causal engine. Its meepserve.json names the base's
+  weights, the training's: `nf4` for method qlora, `bf16` for method lora. A
+  question is read as the training reads it (the shared text once, its cache
+  copied for each group of candidates_per_pass candidates), so a milestone's
+  rows answered through the gateway give the milestone's answers.
 
 ### Engines
 
@@ -65,8 +69,17 @@ kind's adapter applied. The kind does not know which engine runs it.
 - `transformers`: the base with Transformers and PyTorch, one request batch at
   a time; adapters inserted in the base's modules, switchable by name, so
   several parts can share one loaded base.
-- `vllm` (with the choice kind): the base held once for generation and for the
-  choice head's states (serving-generation-and-choice.md).
+- `causal`: a causal language model base with Transformers, in 4-bit NF4
+  (bitsandbytes, computing in bfloat16) or bfloat16 as the part's training
+  held it; LoRA adapters with PEFT on the language model's layers, switchable
+  by name. One question at a time.
+- `vllm` (with the choice kind): the base held once by vLLM 0.32 for generation
+  and for the choice head's states, which vLLM's hidden-state extraction
+  (extract_hidden_states) saves per request: each candidate is read whole,
+  the shared text found in the prefix cache, and the engine applies the
+  final norm to the last layer's state. No second model shares the weights,
+  as serving-generation-and-choice.md planned when vLLM gave no states with
+  generation. A part names it in meepserve.json ("engine": "vllm").
 
 ### The gateway
 
@@ -86,7 +99,9 @@ Meep² trains a kind with the kind's modules from this package, and adds what
 only training needs: the data, the loss, the schedule. It saves in the kind's
 format, through the package, so what Forge trains is what the gateway serves.
 Meep²'s tagging task moves onto the package's tagger modules when a tagger is
-next trained.
+next trained, and its choice task onto the package's choice modules when a
+choice model is next trained; until then the choice kind's head and reading
+are a copy of meepsquared._choice's.
 
 ## The tagger kind's request and answer
 
@@ -121,4 +136,7 @@ Any other tagger:
    transformers backend, and registration of a trained part in the catalogue.
 4. ja-seg, ja-parse and ja-zero in MLflow and the catalogue; checked by their
    own test scores (test.json) through the gateway.
-5. The choice kind and the vLLM engine (the serving plan's Step 2).
+5. The choice kind on the causal engine; checked by a milestone's rows
+   answered through the gateway against the milestone's own answers.
+6. The vllm engine for the choice kind; checked as step 5, against the
+   milestone's answers.

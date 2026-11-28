@@ -18,3 +18,15 @@ jobs:
       - run: pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e ".[test]"
       - run: pytest -q
+
+  # meepserve, the serving package (serve/): its own dependencies, without Meep²
+  serve:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -e "serve[test]"
+      - run: cd serve && pytest -q
