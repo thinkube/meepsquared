@@ -45,8 +45,9 @@ from meepserve import PartError
 
 WEIGHTS = ("nf4", "bf16")
 # The cache vLLM keeps for keys, values and the extracted states, and the longest prompt it reads: a choice
-# question of the subject finder reads up to about 10,000 tokens
-KV_CACHE_BYTES = 4 * 2 ** 30
+# question of the subject finder reads up to about 10,000 tokens; one prompt of MAX_MODEL_LEN tokens of Gemma 4 12B
+# takes 6.25 GiB of it (measured by vLLM 0.32 at start)
+KV_CACHE_BYTES = 7 * 2 ** 30
 MAX_MODEL_LEN = 16384
 MAX_LORA_RANK = 64
 MAX_LORAS = 4
