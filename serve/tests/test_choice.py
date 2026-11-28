@@ -156,7 +156,7 @@ def test_none_output(causal, tmp_path):
 
 def test_refusals(causal, tmp_path):
     part = meepserve.load(write_part(tmp_path / "r", causal), causal, device="cpu")
-    for request, message in (({"texts": ["a"]}, "'questions' only"),
+    for request, message in (({"texts": ["a"]}, "not \\['texts'\\]"),
                              ({"questions": []}, "list of questions"),
                              ({"questions": [{"prompt": "who", "candidates": ["a"]}]}, "at least 2"),
                              ({"questions": [{"prompt": "who\x00", "candidates": ["a", "b"]}]}, "x00"),
@@ -203,7 +203,7 @@ def test_states_and_the_base_alone(causal, tmp_path):
     k = len(QUESTIONS[0]["candidates"])
     assert len(with_adapter["states"]) == k and len(with_adapter["states"][0]) == HIDDEN
     assert len(with_adapter["scores"]) == k
-    assert with_adapter["states"] != pytest.approx(alone["states"], abs=1e-4)
+    assert max(abs(x - y) for s, r in zip(with_adapter["states"], alone["states"]) for x, y in zip(s, r)) > 1e-4
     assert part.answer({"questions": QUESTIONS[:1]})["answers"][0]["probabilities"] == pytest.approx(
         with_adapter["probabilities"], abs=1e-6)
     with pytest.raises(PartError, match="true or false"):
