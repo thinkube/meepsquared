@@ -156,7 +156,7 @@ class VllmBase:
         self.states_dir = Path(tempfile.mkdtemp(prefix="meepserve-states-", dir="/dev/shm"))
         kwargs = dict(
             model=str(self.path), dtype="bfloat16", enable_lora=True, max_lora_rank=MAX_LORA_RANK,
-            max_loras=MAX_LORAS, enable_prefix_caching=False, kv_cache_memory_bytes=KV_CACHE_BYTES,
+            max_loras=MAX_LORAS, enable_prefix_caching=True, kv_cache_memory_bytes=KV_CACHE_BYTES,
             max_model_len=MAX_MODEL_LEN, language_model_only=True, seed=0,
             speculative_config={"method": "extract_hidden_states", "num_speculative_tokens": 1,
                                 "draft_model_config": {"hf_config": {
