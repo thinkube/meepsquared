@@ -320,20 +320,23 @@ class VllmBase:
         normed = last * torch.pow(last.pow(2).mean(-1, keepdim=True) + self.eps, -0.5) * self.norm
         return normed.to(torch.bfloat16)
 
-    def generate(self, prompts: list, max_tokens: int, temperature: float = 0.0, adapter: Optional[str] = None,
-                 stop: Optional[list] = None) -> list:
-        """The text vLLM generates for each prompt (text, the chat template already applied)."""
-        from vllm import SamplingParams
+    def generate(self, prompts: list, max_tokens: Optional[int], temperature: float = 0.0,
+                 adapter: Optional[str] = None, stop: Optional[list] = None, top_p: float = 1.0) -> list:
+        """The text vLLM generates for each prompt (text, the chat template already applied, so tokenized without
+        adding special tokens again), up to max_tokens (None: up to the longest request)."""
+        from vllm import SamplingParams, TokensPrompt
         from vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector import (
             cleanup_hidden_states)
 
         with self._lock:
             paths = [str(self.states_dir / f"gen-{os.getpid()}-{threading.get_ident()}-{i}.safetensors")
                      for i in range(len(prompts))]
-            params = [SamplingParams(temperature=temperature, max_tokens=max_tokens, stop=stop or None,
+            params = [SamplingParams(temperature=temperature, top_p=top_p, max_tokens=max_tokens, stop=stop or None,
                                      extra_args={"kv_transfer_params": {"hidden_states_path": p}}) for p in paths]
+            tokens = [TokensPrompt(prompt_token_ids=self.tokenizer(p, add_special_tokens=False)["input_ids"])
+                      for p in prompts]
             try:
-                out = self.llm.generate(prompts, params, lora_request=self._request(adapter), use_tqdm=False)
+                out = self.llm.generate(tokens, params, lora_request=self._request(adapter), use_tqdm=False)
             except Exception as e:
                 raise PartError(f"vLLM did not generate: {type(e).__name__}: {e}") from e
             for o, path in zip(out, paths):

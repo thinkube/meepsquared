@@ -29,6 +29,7 @@ test = ["pytest>=8", "peft>=0.21.2,<0.22"]
 [project.entry-points."meepserve.kinds"]
 tagger = "meepserve.tagger:KIND"
 choice = "meepserve.choice:KIND"
+generator = "meepserve.generator:KIND"
 
 # vLLM runs it in each of its processes: the vllm engine's changes to the 4-bit loading (meepserve.vllm_engine.register)
 [project.entry-points."vllm.general_plugins"]
