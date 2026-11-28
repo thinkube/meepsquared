@@ -39,9 +39,13 @@ example_hidden_states_connector.load_hidden_states.
 
 import json
 import os
+import queue
 import shutil
 import tempfile
 import threading
+import time
+import uuid
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Optional
 
@@ -54,6 +58,10 @@ WEIGHTS = ("nf4", "bf16")
 # many run at once: a part's meepserve.json names it ("kv_cache_gib"), this when it names none (Gemma 4 12B takes
 # about 0.4 MiB a token, so 7 GiB holds about 18,000 tokens, measured by vLLM 0.32 at start)
 KV_CACHE_BYTES = 7 * 2 ** 30
+# Requests that arrive together are run as one batch: the worker waits this long for more after the first, and takes
+# up to this many prompts (vLLM runs them as its cache allows)
+GATHER_SECONDS = 0.01
+MAX_BATCH = 4096
 # The longest request, prompt and answer: a candidate of the subject finder is read as one request of at most about
 # 700 tokens (its shared text and its own), and a translation's prompt and answer fit too
 MAX_MODEL_LEN = 4096
@@ -193,7 +201,10 @@ class VllmBase:
         self.norm = norm.to(self.device)
         self.adapters = {}  # name -> (id, folder)
         self._made = 0
-        self._lock = threading.Lock()
+        # One worker calls vLLM: the requests of every caller, generation and choice, are run in batches
+        self._pending = queue.Queue()
+        self._worker = threading.Thread(target=self._run, name="meepserve-vllm", daemon=True)
+        self._worker.start()
 
     def _final_norm(self) -> torch.Tensor:
         from safetensors import safe_open
@@ -269,6 +280,45 @@ class VllmBase:
 
     # Reading and generating
 
+    # Callers on several threads may use the engine at once (the server takes no lock for it)
+    concurrent = True
+
+    def _submit(self, prompts: list, params: list, adapter: Optional[str]) -> list:
+        """vLLM's outputs of the prompts, run with the other callers' requests that arrive together."""
+        lora = self._request(adapter)
+        for prompt, param in zip(prompts, params):
+            # Refused here, for its own caller: vLLM refuses the whole batch for one prompt too long
+            if len(prompt["prompt_token_ids"]) + (param.max_tokens or 1) > MAX_MODEL_LEN:
+                raise PartError(f"a prompt of {len(prompt['prompt_token_ids'])} tokens and an answer of up to "
+                                f"{param.max_tokens or 1} are more than the {MAX_MODEL_LEN} tokens a request takes")
+        futures = []
+        for prompt, param in zip(prompts, params):
+            future = Future()
+            self._pending.put((prompt, param, lora, future))
+            futures.append(future)
+        return [f.result() for f in futures]
+
+    def _run(self) -> None:
+        while True:
+            batch = [self._pending.get()]
+            deadline = time.monotonic() + GATHER_SECONDS
+            while len(batch) < MAX_BATCH:
+                left = deadline - time.monotonic()
+                try:
+                    batch.append(self._pending.get(timeout=max(left, 0)) if left > 0 else self._pending.get_nowait())
+                except queue.Empty:
+                    break
+            try:
+                out = self.llm.generate([b[0] for b in batch], [b[1] for b in batch],
+                                        lora_request=[b[2] for b in batch], use_tqdm=False)
+            except Exception as e:
+                error = PartError(f"vLLM did not answer: {type(e).__name__}: {e}")
+                for b in batch:
+                    b[3].set_exception(error)
+                continue
+            for b, o in zip(batch, out):
+                b[3].set_result(o)
+
     def candidate_states(self, adapter: Optional[str], shared: list, own: list, per_pass: int) -> torch.Tensor:
         """The state of the last token of the shared text and each candidate's own text: each read whole, the shared
         text found in the prefix cache after its first reading (per_pass does not apply: vLLM batches them)."""
@@ -292,30 +342,24 @@ class VllmBase:
         from vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector import (
             cleanup_hidden_states, load_hidden_states)
 
-        with self._lock:
-            paths = [str(self.states_dir / f"{os.getpid()}-{threading.get_ident()}-{i}.safetensors")
-                     for i in range(len(prompts))]
-            params = [SamplingParams(temperature=0, max_tokens=1, detokenize=False,
-                                     extra_args={"kv_transfer_params": {"hidden_states_path": p}}) for p in paths]
+        paths = [str(self.states_dir / f"{uuid.uuid4().hex}.safetensors") for _ in prompts]
+        params = [SamplingParams(temperature=0, max_tokens=1, detokenize=False,
+                                 extra_args={"kv_transfer_params": {"hidden_states_path": p}}) for p in paths]
+        out = self._submit([TokensPrompt(prompt_token_ids=p) for p in prompts], params, adapter)
+        found = []
+        for prompt, o, path in zip(prompts, out, paths):
+            saved = (o.kv_transfer_params or {}).get("hidden_states_path", path)
             try:
-                out = self.llm.generate([TokensPrompt(prompt_token_ids=p) for p in prompts], params,
-                                        lora_request=self._request(adapter), use_tqdm=False)
-            except Exception as e:
-                raise PartError(f"vLLM did not read the candidates: {type(e).__name__}: {e}") from e
-            found = []
-            for prompt, o, path in zip(prompts, out, paths):
-                saved = (o.kv_transfer_params or {}).get("hidden_states_path", path)
-                try:
-                    data = load_hidden_states(saved)
-                finally:
-                    cleanup_hidden_states(saved)
-                # The rows of the block that holds the last prompt token, up to it (meepserve.vllm_connector)
-                states, ids = data["hidden_states"], data["token_ids"]
-                if (states.shape[0] != ids.shape[0] or states.shape[-1] != self.hidden or not ids.numel()
-                        or ids.tolist() != prompt[len(prompt) - ids.shape[0]:]):
-                    raise PartError(f"vLLM saved states of shape {tuple(states.shape)} for tokens that are not the end "
-                                    f"of the prompt of {len(prompt)} tokens")
-                found.append(states[-1, 0])
+                data = load_hidden_states(saved)
+            finally:
+                cleanup_hidden_states(saved)
+            # The rows of the block that holds the last prompt token, up to it (meepserve.vllm_connector)
+            states, ids = data["hidden_states"], data["token_ids"]
+            if (states.shape[0] != ids.shape[0] or states.shape[-1] != self.hidden or not ids.numel()
+                    or ids.tolist() != prompt[len(prompt) - ids.shape[0]:]):
+                raise PartError(f"vLLM saved states of shape {tuple(states.shape)} for tokens that are not the end "
+                                f"of the prompt of {len(prompt)} tokens")
+            found.append(states[-1, 0])
         last = torch.stack(found).to(self.device).float()
         normed = last * torch.pow(last.pow(2).mean(-1, keepdim=True) + self.eps, -0.5) * self.norm
         return normed.to(torch.bfloat16)
@@ -328,19 +372,14 @@ class VllmBase:
         from vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector import (
             cleanup_hidden_states)
 
-        with self._lock:
-            paths = [str(self.states_dir / f"gen-{os.getpid()}-{threading.get_ident()}-{i}.safetensors")
-                     for i in range(len(prompts))]
-            params = [SamplingParams(temperature=temperature, top_p=top_p, max_tokens=max_tokens, stop=stop or None,
-                                     extra_args={"kv_transfer_params": {"hidden_states_path": p}}) for p in paths]
-            tokens = [TokensPrompt(prompt_token_ids=self.tokenizer(p, add_special_tokens=False)["input_ids"])
-                      for p in prompts]
-            try:
-                out = self.llm.generate(tokens, params, lora_request=self._request(adapter), use_tqdm=False)
-            except Exception as e:
-                raise PartError(f"vLLM did not generate: {type(e).__name__}: {e}") from e
-            for o, path in zip(out, paths):
-                _drop((o.kv_transfer_params or {}).get("hidden_states_path", path), cleanup_hidden_states)
+        paths = [str(self.states_dir / f"gen-{uuid.uuid4().hex}.safetensors") for _ in prompts]
+        params = [SamplingParams(temperature=temperature, top_p=top_p, max_tokens=max_tokens, stop=stop or None,
+                                 extra_args={"kv_transfer_params": {"hidden_states_path": p}}) for p in paths]
+        tokens = [TokensPrompt(prompt_token_ids=self.tokenizer(p, add_special_tokens=False)["input_ids"])
+                  for p in prompts]
+        out = self._submit(tokens, params, adapter)
+        for o, path in zip(out, paths):
+            _drop((o.kv_transfer_params or {}).get("hidden_states_path", path), cleanup_hidden_states)
         return [{"text": o.outputs[0].text, "finish_reason": o.outputs[0].finish_reason,
                  "prompt_tokens": len(o.prompt_token_ids), "completion_tokens": len(o.outputs[0].token_ids)}
                 for o in out]
