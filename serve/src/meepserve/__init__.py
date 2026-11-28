@@ -89,9 +89,13 @@ def engine_for(contract: dict, base, device: Optional[str] = None):
             from meepserve.causal import CausalBase
 
             return CausalBase(base, contract["weights"], device)
-        from meepserve.vllm_engine import VllmBase
+        from meepserve.vllm_engine import KV_CACHE_BYTES, VllmBase
 
-        return VllmBase(base, contract["weights"], device)
+        cache = contract.get("kv_cache_gib")
+        if cache is not None and (isinstance(cache, bool) or not isinstance(cache, (int, float)) or cache <= 0):
+            raise PartError(f"{CONTRACT}: 'kv_cache_gib' is the vllm engine's cache in GiB, a number above 0")
+        return VllmBase(base, contract["weights"], device,
+                        KV_CACHE_BYTES if cache is None else int(cache * 2 ** 30))
     raise PartError(f"the kind {kind.name} runs on the engine {chosen!r}, which this package does not have")
 
 

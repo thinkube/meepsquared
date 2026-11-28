@@ -205,10 +205,15 @@ class ChoicePart:
     def ask(self, questions: list, give_states: bool = False, adapter: bool = True) -> list:
         tokenizer = self.engine.tokenizer
         found = []
+        name = self.adapter if adapter else None
+        encoded = [encode(tokenizer, q["prompt"], q["candidates"]) for q in questions]
         with torch.no_grad():
-            for question in questions:
-                shared, own = encode(tokenizer, question["prompt"], question["candidates"])
-                leaves = self.engine.candidate_states(self.adapter if adapter else None, shared, own, self.per_pass)
+            if hasattr(self.engine, "many_candidate_states"):
+                # An engine that batches requests reads every question's candidates together
+                read = self.engine.many_candidate_states(name, encoded, self.per_pass)
+            else:
+                read = [self.engine.candidate_states(name, shared, own, self.per_pass) for shared, own in encoded]
+            for question, leaves in zip(questions, read):
                 z, states = outputs(self.head, leaves)
                 none = question.get("none")
                 best, probability = choose(self.head, z, states, none)

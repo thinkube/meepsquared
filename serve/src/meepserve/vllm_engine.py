@@ -50,11 +50,13 @@ import torch
 from meepserve import PartError
 
 WEIGHTS = ("nf4", "bf16")
-# The cache vLLM keeps for keys, values and the extracted states, and the longest prompt it reads: a choice
-# question of the subject finder reads up to about 10,000 tokens; one prompt of MAX_MODEL_LEN tokens of Gemma 4 12B
-# takes 6.25 GiB of it (measured by vLLM 0.32 at start)
+# The cache vLLM keeps for keys, values and the extracted states, shared by every request in flight, so it sets how
+# many run at once: a part's meepserve.json names it ("kv_cache_gib"), this when it names none (Gemma 4 12B takes
+# about 0.4 MiB a token, so 7 GiB holds about 18,000 tokens, measured by vLLM 0.32 at start)
 KV_CACHE_BYTES = 7 * 2 ** 30
-MAX_MODEL_LEN = 16384
+# The longest request, prompt and answer: a candidate of the subject finder is read as one request of at most about
+# 700 tokens (its shared text and its own), and a translation's prompt and answer fit too
+MAX_MODEL_LEN = 4096
 MAX_LORA_RANK = 64
 MAX_LORAS = 4
 # The block of weights each NF4 scale covers in a Transformers model loaded in 4 bits (bitsandbytes' Linear4bit)
@@ -144,7 +146,7 @@ class VllmBase:
 
     name = "vllm"
 
-    def __init__(self, path, weights: str, device: Optional[str] = None):
+    def __init__(self, path, weights: str, device: Optional[str] = None, kv_cache_bytes: int = KV_CACHE_BYTES):
         if weights not in WEIGHTS:
             raise PartError(f"the vllm engine holds a base with weights {list(WEIGHTS)}, not {weights!r}")
         if not torch.cuda.is_available():
@@ -170,7 +172,7 @@ class VllmBase:
         self.adapters_dir = Path(tempfile.mkdtemp(prefix="meepserve-adapters-"))
         kwargs = dict(
             model=str(self.path), dtype="bfloat16", enable_lora=True, max_lora_rank=MAX_LORA_RANK,
-            max_loras=MAX_LORAS, enable_prefix_caching=True, kv_cache_memory_bytes=KV_CACHE_BYTES,
+            max_loras=MAX_LORAS, enable_prefix_caching=True, kv_cache_memory_bytes=int(kv_cache_bytes),
             max_model_len=MAX_MODEL_LEN, language_model_only=True, seed=0,
             speculative_config={"method": "extract_hidden_states", "num_speculative_tokens": 1,
                                 "draft_model_config": {"hf_config": {
@@ -271,6 +273,17 @@ class VllmBase:
         """The state of the last token of the shared text and each candidate's own text: each read whole, the shared
         text found in the prefix cache after its first reading (per_pass does not apply: vLLM batches them)."""
         return self.last_states(adapter, [shared + o for o in own])
+
+    def many_candidate_states(self, adapter: Optional[str], questions: list, per_pass: int) -> list:
+        """candidate_states of many questions ((shared, own) each) in one batch of requests, which vLLM runs together
+        as the cache allows; one tensor per question."""
+        prompts = [shared + o for shared, own in questions for o in own]
+        states = self.last_states(adapter, prompts)
+        found, start = [], 0
+        for _, own in questions:
+            found.append(states[start:start + len(own)])
+            start += len(own)
+        return found
 
     def last_states(self, adapter: Optional[str], prompts: list) -> torch.Tensor:
         """The normed last-layer state of the last token of each prompt (token ids), read with `adapter`, in
