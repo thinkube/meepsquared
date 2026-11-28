@@ -21,9 +21,9 @@ ends, and an engine core inside this process takes no step once generate
 has returned, so a reader would wait on the states for ever.
 
 Weights (the part's meepserve.json): "nf4", bitsandbytes' 4-bit NF4
-quantized as vLLM loads the base (vllm-bnb-plugin; its in-flight
-quantization quantizes the scales too, which a QLoRA training's NF4 does
-not), computing in bfloat16; "bf16", bfloat16.
+quantized as vLLM loads the base (vllm-bnb-plugin), each weight as a QLoRA
+training's Transformers model quantizes it (see register), computing in
+bfloat16; "bf16", bfloat16.
 
 Generation (generate): the base alone, or with an adapter, greedy or
 sampled, as vLLM generates.
@@ -56,6 +56,8 @@ KV_CACHE_BYTES = 7 * 2 ** 30
 MAX_MODEL_LEN = 16384
 MAX_LORA_RANK = 64
 MAX_LORAS = 4
+# The block of weights each NF4 scale covers in a Transformers model loaded in 4 bits (bitsandbytes' Linear4bit)
+NF4_BLOCKSIZE = 64
 # The final norm's weight in the checkpoint, by the ends of the names a causal LM gives it
 FINAL_NORMS = ("language_model.norm.weight", "model.norm.weight")
 
@@ -71,24 +73,53 @@ def _drop(path: str, cleanup) -> None:
     cleanup(path)
 
 
-def _no_bnb_load_of_the_extraction() -> None:
-    """vLLM loads the extraction's model (ExtractHiddenStatesModel) with the loader of the base's load format, so
-    with a 4-bit base the bitsandbytes plugin's loader, which refuses a model with no linear layer to quantize. That
-    model holds no weights: its loading is nothing to do, and the loader is not run on it."""
-    from vllm.model_executor.models.extract_hidden_states import ExtractHiddenStatesModel
-    from vllm_bnb_plugin.bitsandbytes_loader import BitsAndBytesModelLoader
+def register() -> None:
+    """meepserve's vLLM plugin (entry point vllm.general_plugins), which vLLM runs in each of its processes, the
+    engine core's among them, so that these hold where the base is loaded:
 
-    if getattr(BitsAndBytesModelLoader, "_meepserve_skips_extraction", False):
+    - the bitsandbytes plugin's loader is not run on the extraction's model (ExtractHiddenStatesModel): vLLM loads it
+      with the base's loader, and the bitsandbytes loader refuses a model with no linear layer to quantize; it holds
+      no weights, and its loading is nothing to do;
+    - while that loader runs, bitsandbytes quantizes a weight as a QLoRA training's Transformers model does, NF4 in
+      blocks of 64 with each block's scale in 32 bits (not quantized again): the plugin's in-flight quantization
+      asks for the scales quantized, which gives other weights than the ones a part was trained on.
+
+    Without the bitsandbytes plugin installed there is no loader to change: vLLM then refuses a 4-bit base itself."""
+    try:
+        from vllm_bnb_plugin.bitsandbytes_loader import BitsAndBytesModelLoader
+    except ImportError:
         return
-    real = BitsAndBytesModelLoader.load_weights
+    if getattr(BitsAndBytesModelLoader, "_meepserve", False):
+        return
+    import bitsandbytes.functional as bnb_functional
+    from vllm.model_executor.models.extract_hidden_states import ExtractHiddenStatesModel
+
+    loading = threading.local()
+    real_quantize = bnb_functional.quantize_4bit
+
+    def quantize_4bit(A, *args, **kwargs):
+        if getattr(loading, "active", False):
+            if kwargs.get("quant_type", "fp4") != "nf4":
+                raise RuntimeError(f"the bitsandbytes plugin asked for {kwargs.get('quant_type')}; meepserve's "
+                                   "vllm engine holds NF4")
+            kwargs["compress_statistics"] = False
+            kwargs["blocksize"] = NF4_BLOCKSIZE
+        return real_quantize(A, *args, **kwargs)
+
+    real_load = BitsAndBytesModelLoader.load_weights
 
     def load_weights(self, model, model_config):
         if isinstance(model, ExtractHiddenStatesModel):
             return None
-        return real(self, model, model_config)
+        loading.active = True
+        try:
+            return real_load(self, model, model_config)
+        finally:
+            loading.active = False
 
+    bnb_functional.quantize_4bit = quantize_4bit
     BitsAndBytesModelLoader.load_weights = load_weights
-    BitsAndBytesModelLoader._meepserve_skips_extraction = True
+    BitsAndBytesModelLoader._meepserve = True
 
 
 def _text_config(config: dict) -> dict:
@@ -135,7 +166,7 @@ class VllmBase:
                                            "allow_custom_save_path": True}))
         if weights == "nf4":
             kwargs["quantization"] = "bitsandbytes"
-            _no_bnb_load_of_the_extraction()
+            # meepserve's vLLM plugin (register) makes vLLM's 4-bit loading the training's, in vLLM's processes
         try:
             self.llm = LLM(**kwargs)
         except Exception as e:

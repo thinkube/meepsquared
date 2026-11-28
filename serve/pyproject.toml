@@ -30,6 +30,10 @@ test = ["pytest>=8", "peft>=0.21.2,<0.22"]
 tagger = "meepserve.tagger:KIND"
 choice = "meepserve.choice:KIND"
 
+# vLLM runs it in each of its processes: the vllm engine's changes to the 4-bit loading (meepserve.vllm_engine.register)
+[project.entry-points."vllm.general_plugins"]
+meepserve = "meepserve.vllm_engine:register"
+
 [project.urls]
 Repository = "https://github.com/thinkube/meepsquared"
 
