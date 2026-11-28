@@ -76,9 +76,17 @@ class CausalBase:
         return model.get_decoder()
 
     def targets(self, names: list) -> list:
-        """The full names of the linear layers named one of `names`, outside the vision, audio and image modules."""
-        return [n for n, m in self.model.named_modules() if isinstance(m, nn.Linear)
-                and n.rsplit(".", 1)[-1] in names and not any(tower in n for tower in TOWERS)]
+        """The full names of the linear layers named one of `names`, outside the vision, audio and image modules. A
+        layer that holds adapters already is named as it was before PEFT wrapped it (its linear layer is then its
+        base_layer)."""
+        found = []
+        for n, m in self.model.named_modules():
+            if not isinstance(m, nn.Linear):
+                continue
+            n = n.removesuffix(".base_layer")
+            if n.rsplit(".", 1)[-1] in names and not any(tower in n for tower in TOWERS):
+                found.append(n)
+        return found
 
     def add_lora(self, rank: int, alpha, names: list, state: dict) -> str:
         """A LoRA adapter of `rank` and `alpha` on the layers `names` (see targets), its weights `state` as PEFT
